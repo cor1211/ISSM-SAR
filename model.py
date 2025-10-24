@@ -96,10 +96,27 @@ class PFE(nn.Module):
         after_relu =  nn.ReLU(True)(torch.concat(outs_way, dim=1))
         return ECA(in_c=after_relu.size()[1])(after_relu)
 
+# Deconv2d Block
+class Deconv2d(nn.Module):
+    def __init__(self, in_c):
+        super().__init__()
+        self.deconv2d = nn.ConvTranspose2d(in_channels=in_c, out_channels=1, kernel_size=3, padding=5, stride=2, output_padding=0)
+    
+    def forward(self, x):
+        x = self.deconv2d(x)
+        return x
+
 if __name__ == '__main__':
-    input = torch.rand(16, 1, 256,256)
-    print(f"Input size: {input.shape}")
+    # input = torch.rand(16, 1, 256,256)
+    # print(f"Input size: {input.shape}")
     # layer = MultiLooks(1)
-    pfe_block = PFE(in_channels=1)
-    out = pfe_block(input)
+    # pfe_block = PFE(in_channels=1)
+    # out = pfe_block(input)
+    # print(f'Output size: {out.shape}')
+
+    input1 = torch.rand(1, 1, 2, 2)
+    print(f"Input size: {input1.shape}")
+    deconv2d = Deconv2d(1)
+    out = deconv2d(input1)    
     print(f'Output size: {out.shape}')
+    print(out)
