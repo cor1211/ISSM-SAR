@@ -5,7 +5,7 @@ from pytorch_wavelets import DWTForward, DWTInverse
 import math
 from PIL import Image 
 from torchvision.transforms import Resize, InterpolationMode
-
+from torchvision.ops import DeformConv2d
 # Khoi 3 CNN
 class MultiLooks(nn.Module):
     def __init__(self, in_channel:int = 1):
@@ -97,14 +97,59 @@ class PFE(nn.Module):
         return ECA(in_c=after_relu.size()[1])(after_relu)
 
 # Deconv2d Block
-class Deconv2d(nn.Module):
+class DeConv2d(nn.Module):
     def __init__(self, in_c):
         super().__init__()
-        self.deconv2d = nn.ConvTranspose2d(in_channels=in_c, out_channels=1, kernel_size=3, padding=5, stride=2, output_padding=0)
+        self.deconv2d = nn.ConvTranspose2d(in_channels=in_c, out_channels=1, kernel_size=3, padding=0, stride=2, output_padding=1)
     
     def forward(self, x):
         x = self.deconv2d(x)
         return x
+
+class DeformConv2dBlock(nn.Module):
+    def __init__(self, in_c):
+        super().__init__()
+        self.offset_conv = nn.Conv2d(in_c, 2*3*3, 3, 1, 0)
+        self.deform_conv = DeformConv2d(in_c, 1, 3, 1, 0)
+
+    def forward(self, x):
+        offset = self.offset_conv(x)
+        x = self.deform_conv(x, offset)
+        return x
+
+class Deconv_DeformBlock(nn.Module):
+    def __init__(self, in_c, kernel_size):
+        super().__init__()
+        self.deconv = nn.ConvTranspose2d(in_channels=in_c, out_channels=64, kernel_size=kernel_size, stride=1, padding=1)
+        self.deformconv = DeformConv2d(in_channels=64, out_channels=in_c, kernel_size=kernel_size, padding=kernel_size//2)
+        self.offset_conv = nn.Conv2d(in_channels=64, out_channels=2 * kernel_size*kernel_size, kernel_size=kernel_size, padding=kernel_size//2)
+
+    def forward(self, x): # In = [N, 336, H, W]
+        out_block = self.deconv(x)  # Out = [N, 64, H', W'] (H' = H, W' = W)
+        out_block = nn.ReLU(True)(out_block) # Out = [N, 64, H', W']
+        offset = self.offset_conv(out_block) # Out_offset = [N, 2*k*k, H', W']
+        out_block = self.deformconv(out_block, offset) # Out = [N, out_c, H', W']
+        out_block = nn.ReLU(True)(out_block) # Out = [N, out_c, H', W']
+        return x, out_block            
+            
+class HFE(nn.Module):
+    def __init__(self, in_c, out_c, kernel_size):
+        super().__init__()
+        self.blocks = nn.ModuleList()
+        self.blocks.append(
+            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
+            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
+            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
+            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
+            DeformConv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, padding=kernel_size//2)
+        )
+
+    def forward(self, x):
+        in_tensor = x
+        for idx, block in enumerate(self.blocks):
+            if idx != 1 and idx != 2:
+                x= block(x)
+
 
 if __name__ == '__main__':
     # input = torch.rand(16, 1, 256,256)
@@ -114,9 +159,23 @@ if __name__ == '__main__':
     # out = pfe_block(input)
     # print(f'Output size: {out.shape}')
 
-    input1 = torch.rand(1, 1, 2, 2)
-    print(f"Input size: {input1.shape}")
-    deconv2d = Deconv2d(1)
-    out = deconv2d(input1)    
-    print(f'Output size: {out.shape}')
-    print(out)
+    # input1 = torch.rand(1, 1, 2, 2)
+    # print(f"Input size: {input1.shape}")
+    # deconv2d = DeConv2d(1)
+    # out = deconv2d(input1)    
+    # print(f'Output size: {out.shape}')
+    # print(out)
+
+    # input2 = torch.rand(1,1,16,16)
+    # print(f"Input size: {input2.shape}")
+    # deformconv2d = DeformConv2dBlock(1)
+    # out = deformconv2d(input2)    
+    # print(f'Output size: {out.shape}')
+    # print(out)
+
+    input3 = torch.rand(1,336,256,256)
+    print(f"Input size: {input3.shape}")
+    trans_deform_block = Deconv_DeformBlock(in_c=336, out_c=336, kernel_size=3)
+    out = trans_deform_block(input3)    
+    print(f'Output size: {out[0].shape}, {out[1].shape}')
+    # print(out)
