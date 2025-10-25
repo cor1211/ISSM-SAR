@@ -128,31 +128,39 @@ class Deconv_DeformBlock(nn.Module):
         out_block = self.deconv(x)  # Out = [N, 64, H', W'] (H' = H, W' = W)
         out_block = nn.ReLU(True)(out_block) # Out = [N, 64, H', W']
         offset = self.offset_conv(out_block) # Out_offset = [N, 2*k*k, H', W']
-        out_block = self.deformconv(out_block, offset) # Out = [N, out_c, H', W']
-        out_block = nn.ReLU(True)(out_block) # Out = [N, out_c, H', W']
-        return x, out_block            
+        out_block = self.deformconv(out_block, offset) # Out = [N, in_c, H', W']
+        out_block = nn.ReLU(True)(out_block) # Out = [N, in_c, H', W']
+        return out_block            
             
 class HFE(nn.Module):
     def __init__(self, in_c, out_c, kernel_size):
         super().__init__()
+        self.in_block = Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size)
         self.blocks = nn.ModuleList()
-        self.blocks.append(
-            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
-            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
-            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
-            Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size),
-            DeformConv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, padding=kernel_size//2)
-        )
+        for _ in range(3):
+            self.blocks.append(Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size))
+        
+        self.offset_conv = nn.Conv2d(in_channels=in_c + in_c, out_channels=2 * kernel_size*kernel_size, kernel_size=kernel_size, padding=kernel_size//2)
+        self.out_deformConv = DeformConv2d(in_channels=in_c + in_c, out_channels=out_c, kernel_size=kernel_size, padding=kernel_size//2) # Note: last block have input concat with in_module, so in_channels = 2*in_c
 
     def forward(self, x):
-        in_tensor = x
-        for idx, block in enumerate(self.blocks):
-            if idx != 0 and idx != 1:
-                x= block(x)
-            else:
-                x = block(x)
-
-
+        in_module = x # In = [N, 336, H, W]
+        x = self.in_block(x) # Out = [N, 336, H, W]
+        in_previous_block = torch.zeros_like(x) # [N, 336, H, W]
+        
+        for block in self.blocks:
+            in_cur_block = x + in_previous_block
+            x = block(in_cur_block) # Out = [N, 336, H, W]
+            in_previous_block = in_cur_block
+        x_concat = torch.concat((x, in_module), dim=1)
+        offset = self.offset_conv(x_concat)
+        return self.out_deformConv(x_concat, offset)
+    
+# class ISSM_SAR(nn.Module):
+#     def __init__(self, in_channel, out_channel):
+#         super().__init__()
+        
+         
 if __name__ == '__main__':
     # input = torch.rand(16, 1, 256,256)
     # print(f"Input size: {input.shape}")
@@ -175,9 +183,14 @@ if __name__ == '__main__':
     # print(f'Output size: {out.shape}')
     # print(out)
 
-    input3 = torch.rand(1,336,256,256)
-    print(f"Input size: {input3.shape}")
-    trans_deform_block = Deconv_DeformBlock(in_c=336, out_c=336, kernel_size=3)
-    out = trans_deform_block(input3)    
-    print(f'Output size: {out[0].shape}, {out[1].shape}')
-    # print(out)
+    # input3 = torch.rand(1,336,256,256)
+    # print(f"Input size: {input3.shape}")
+    # trans_deform_block = Deconv_DeformBlock(in_c=336, out_c=336, kernel_size=3)
+    # out = trans_deform_block(input3)    
+    # print(f'Output size: {out[0].shape}, {out[1].shape}')
+
+    input = torch.rand(4, 8, 16,16)
+    print(f"Input size: {input.shape}")
+    module = HFE(in_c=8, out_c=16, kernel_size=3)
+    out = module(input)
+    print(f'Output size: {out.shape}')
