@@ -147,8 +147,10 @@ class HFE(nn.Module):
     def forward(self, x):
         in_tensor = x
         for idx, block in enumerate(self.blocks):
-            if idx != 1 and idx != 2:
+            if idx != 0 and idx != 1:
                 x= block(x)
+            else:
+                x = block(x)
 
 
 if __name__ == '__main__':
