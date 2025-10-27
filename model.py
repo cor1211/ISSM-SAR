@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import squeeze, transpose, unsqueeze
 from pytorch_wavelets import DWTForward, DWTInverse
 import math
 from PIL import Image 
-from torchvision.transforms import Resize, InterpolationMode
+from torchvision.transforms import Resize,ToTensor, InterpolationMode
 from torchvision.ops import DeformConv2d
 # Khoi 3 CNN
 class MultiLooks(nn.Module):
@@ -155,7 +156,19 @@ class HFE(nn.Module):
         x_concat = torch.concat((x, in_module), dim=1)
         offset = self.offset_conv(x_concat)
         return self.out_deformConv(x_concat, offset)
+
+class REC(nn.Module): # In = [N, out_HFE, H, W]
+    def __init__(self, in_c, out_c):
+        super().__init__()
+        self.deconv = nn.ConvTranspose2d(in_channels=in_c, out_channels= 64, kernel_size=3, stride=2, padding=1, output_padding=1) # Out = [N, 64, 2H, 2W]
+        self.conv = nn.Conv2d(in_channels=64, out_channels=out_c, kernel_size=3, padding=1) # Out = [N, 1, 2H, 2W]
     
+    def forward(self, x):
+        x = self.deconv(x) # Out = [N, 64, 2H, 2W]
+        x = self.conv(x) # Out = [N, 1, 2H, 2W]
+        return x
+    
+
 # class ISSM_SAR(nn.Module):
 #     def __init__(self, in_channel, out_channel):
 #         super().__init__()
@@ -189,8 +202,25 @@ if __name__ == '__main__':
     # out = trans_deform_block(input3)    
     # print(f'Output size: {out[0].shape}, {out[1].shape}')
 
-    input = torch.rand(4, 8, 16,16)
+    input = torch.rand(4, 1, 16,16)
     print(f"Input size: {input.shape}")
-    module = HFE(in_c=8, out_c=16, kernel_size=3)
-    out = module(input)
-    print(f'Output size: {out.shape}')
+
+    pfe = PFE(in_channels=1)
+    hfe = HFE(in_c=336, out_c=32, kernel_size=3)
+    rec = REC(in_c=32, out_c=1)
+
+    
+    new_size = (input.shape[2]*2, input.shape[3]*2)
+    f1 = pfe(input) # Out = [N, 336, H, W]
+    print(f"F1 size: {f1.shape}")
+    h1 = hfe(f1) # Out = [N, 32, H, W]
+    print(f"h1 size: {h1.shape}")   
+    after_REC = rec(h1) # Out = [N, 1, 2H, 2W]
+    print(f"after_REC size: {after_REC.shape}")
+
+    umsampled_tensor = F.interpolate(input, scale_factor=2, align_corners=False, mode='bilinear')
+    # Skip-connection
+    after_sum = after_REC + umsampled_tensor
+    print(after_sum.shape) # Out = [N, 1, 2H, 2W]
+
+    # print(f'Output size: {out.shape}')
