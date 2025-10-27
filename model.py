@@ -98,25 +98,25 @@ class PFE(nn.Module):
         return ECA(in_c=after_relu.size()[1])(after_relu)
 
 # Deconv2d Block
-class DeConv2d(nn.Module):
-    def __init__(self, in_c):
-        super().__init__()
-        self.deconv2d = nn.ConvTranspose2d(in_channels=in_c, out_channels=1, kernel_size=3, padding=0, stride=2, output_padding=1)
+# class DeConv2d(nn.Module):
+#     def __init__(self, in_c):
+#         super().__init__()
+#         self.deconv2d = nn.ConvTranspose2d(in_channels=in_c, out_channels=1, kernel_size=3, padding=0, stride=2, output_padding=1)
     
-    def forward(self, x):
-        x = self.deconv2d(x)
-        return x
+#     def forward(self, x):
+#         x = self.deconv2d(x)
+#         return x
 
-class DeformConv2dBlock(nn.Module):
-    def __init__(self, in_c):
-        super().__init__()
-        self.offset_conv = nn.Conv2d(in_c, 2*3*3, 3, 1, 0)
-        self.deform_conv = DeformConv2d(in_c, 1, 3, 1, 0)
+# class DeformConv2dBlock(nn.Module):
+#     def __init__(self, in_c):
+#         super().__init__()
+#         self.offset_conv = nn.Conv2d(in_c, 2*3*3, 3, 1, 0)
+#         self.deform_conv = DeformConv2d(in_c, 1, 3, 1, 0)
 
-    def forward(self, x):
-        offset = self.offset_conv(x)
-        x = self.deform_conv(x, offset)
-        return x
+#     def forward(self, x):
+#         offset = self.offset_conv(x)
+#         x = self.deform_conv(x, offset)
+#         return x
 
 class Deconv_DeformBlock(nn.Module):
     def __init__(self, in_c, kernel_size):
@@ -166,7 +166,7 @@ class REC(nn.Module): # In = [N, out_HFE, H, W]
     def forward(self, x):
         x = self.deconv(x) # Out = [N, 64, 2H, 2W]
         x = self.conv(x) # Out = [N, 1, 2H, 2W]
-        return x
+        return x            
     
 
 # class ISSM_SAR(nn.Module):
