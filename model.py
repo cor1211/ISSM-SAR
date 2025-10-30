@@ -133,7 +133,7 @@ class Deconv_DeformBlock(nn.Module):
         out_block = nn.ReLU(True)(out_block) # Out = [N, in_c, H', W']
         return out_block            
             
-class HFE(nn.Module):
+class HFE(nn.Module): # Fix out_c = in_c
     def __init__(self, in_c, out_c, kernel_size):
         super().__init__()
         self.in_block = Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size)
@@ -313,9 +313,20 @@ if __name__ == '__main__':
     # after_sum = after_REC + umsampled_tensor
     # print(f'After_Sum size: {after_sum.shape}') # Out = [N, 1, 2H, 2W]
 
-    ifs = IFS(in_c=112, out_c=112, num_groups=3)
     f_1 = torch.rand(4, 112, 16, 16)
+    f_2 = torch.rand(4, 112, 16, 16)
     h_1 = torch.rand(4, 112, 16, 16)
     h_2 = torch.rand(4, 112, 16, 16)
-    out = ifs(f_1, h_1, h_2)
-    print(out.shape)
+
+    for _ in range(3):
+        ifs_up = IFS(in_c=112, out_c=112, num_groups=3)
+        ifs_down = IFS(in_c=112, out_c=112, num_groups=3)
+        out_up = ifs_up(f_1, h_1, h_2)
+        out_down = ifs_down(f_2, h_2, h_1)
+
+        h_1 = out_up
+        h_2 = out_down
+
+    
+    print(out_up.shape)
+    print(out_down.shape)
