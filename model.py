@@ -167,7 +167,97 @@ class REC(nn.Module): # In = [N, out_HFE, H, W]
         x = self.deconv(x) # Out = [N, 64, 2H, 2W]
         x = self.conv(x) # Out = [N, 1, 2H, 2W]
         return x            
-    
+
+#--------- IFS's Blocks ----------
+class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow scale_factor x2
+    def __init__(self, in_c, out_c, kernel_size, padding, stride):
+        super().__init__()
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
+            nn.PReLU(num_parameters=1, init=0.2),
+            nn.BatchNorm2d(num_features=out_c),
+        )
+
+    def forward(self, x):
+        x = self.deconv(x)
+        return x
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
+            nn.PReLU(num_parameters=1, init=0.2),
+            nn.BatchNorm2d(num_features=out_c),
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        return x
+
+# ----- Build IFS Block ------
+class IFS(nn.Module):
+    def __init__(self, in_c, out_c, num_groups):
+        super().__init__()
+        self.compress_in = ConvBlock(in_c=3*in_c, out_c = in_c, kernel_size=1, padding=0, stride=1)
+        self.upBlocks = nn.ModuleList()
+        self.downBlocks = nn.ModuleList()
+        self.uptranBlocks = nn.ModuleList()
+        self.downtranBlocks = nn.ModuleList()
+
+        self.re_guide = ConvBlock(in_c=2*in_c, out_c=in_c, kernel_size=1, padding=0, stride=1)
+
+        self.num_groups = num_groups
+        for idx in range(self.num_groups):
+            self.upBlocks.append(
+                DeConvBlock(in_c=in_c, out_c=in_c, kernel_size=6, padding=2, stride=2)
+            )
+
+            self.downBlocks.append(
+                ConvBlock(in_c=in_c, out_c=in_c, kernel_size=6, padding=2, stride=2)
+            )
+
+            if idx > 0: # Add conv 1x1
+                self.uptranBlocks.append(
+                    ConvBlock(in_c=(idx+1)*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0)
+                )
+
+                self.downtranBlocks.append(
+                    ConvBlock(in_c=(idx+1)*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0)
+                )
+        
+        self.compress_out = ConvBlock(in_c=num_groups*in_c, out_c=out_c, kernel_size=1, padding=0, stride=1)
+
+    def forward(self, f_in, h_same_way, h_other_way):
+        x = torch.concat((f_in, h_same_way, h_other_way), dim=1) # Out = [N, 3*in_c, H, W]
+        x = self.compress_in(x) # Out = [N, in_c, H, W]
+
+        lr_features = []
+        hr_features = []
+        lr_features.append(x)
+
+        for idx in range(self.num_groups):
+            LR_F = torch.concat(lr_features, dim=1) # idx 0: Out = [N, in_c, H, W]
+            if idx > 0:
+                LR_F = self.uptranBlocks[idx - 1](LR_F) # Out = [N, in_c, H, W]
+            HR_F = self.upBlocks[idx](LR_F) # idx 0: Out = [N, in_c, 2H, 2W]
+            hr_features.append(HR_F)
+
+            HR_F = torch.concat(hr_features, dim=1)
+            if idx > 0:
+                HR_F = self.downtranBlocks[idx - 1](HR_F)
+            LR_F = self.downBlocks[idx](HR_F)
+
+            if idx == int(self.num_groups//2):
+                LR_F = torch.concat((LR_F, h_other_way), dim=1)
+                LR_F = self.re_guide(LR_F)
+            
+            lr_features.append(LR_F)
+        
+        del hr_features
+        output = torch.concat(lr_features[1:], dim=1) # Out = [N, 3in_c, H, W]
+        output = self.compress_out(output) # Out = [N, in_c, H, W]
+        return output
 
 # class ISSM_SAR(nn.Module):
 #     def __init__(self, in_channel, out_channel):
@@ -202,25 +292,30 @@ if __name__ == '__main__':
     # out = trans_deform_block(input3)    
     # print(f'Output size: {out[0].shape}, {out[1].shape}')
 
-    input = torch.rand(4, 1, 16,16)
-    print(f"Input size: {input.shape}")
+    # input = torch.rand(4, 1, 16,16)
+    # print(f"Input size: {input.shape}")
 
-    pfe = PFE(in_channels=1)
-    hfe = HFE(in_c=336, out_c=32, kernel_size=3)
-    rec = REC(in_c=32, out_c=1)
+    # pfe = PFE(in_channels=1)
+    # hfe = HFE(in_c=336, out_c=336, kernel_size=3)
+    # rec = REC(in_c=336, out_c=1)
 
     
-    new_size = (input.shape[2]*2, input.shape[3]*2)
-    f1 = pfe(input) # Out = [N, 336, H, W]
-    print(f"F1 size: {f1.shape}")
-    h1 = hfe(f1) # Out = [N, 32, H, W]
-    print(f"h1 size: {h1.shape}")   
-    after_REC = rec(h1) # Out = [N, 1, 2H, 2W]
-    print(f"after_REC size: {after_REC.shape}")
+    # new_size = (input.shape[2]*2, input.shape[3]*2)
+    # f1 = pfe(input) # Out = [N, 336, H, W]
+    # print(f"F1 size: {f1.shape}")
+    # h1 = hfe(f1) # Out = [N, 32, H, W]
+    # print(f"h1 size: {h1.shape}")   
+    # after_REC = rec(h1) # Out = [N, 1, 2H, 2W]
+    # print(f"after_REC size: {after_REC.shape}")
 
-    umsampled_tensor = F.interpolate(input, scale_factor=2, align_corners=False, mode='bilinear')
-    # Skip-connection
-    after_sum = after_REC + umsampled_tensor
-    print(after_sum.shape) # Out = [N, 1, 2H, 2W]
+    # umsampled_tensor = F.interpolate(input, scale_factor=2, align_corners=False, mode='bilinear')
+    # # Skip-connection
+    # after_sum = after_REC + umsampled_tensor
+    # print(f'After_Sum size: {after_sum.shape}') # Out = [N, 1, 2H, 2W]
 
-    # print(f'Output size: {out.shape}')
+    ifs = IFS(in_c=112, out_c=112, num_groups=3)
+    f_1 = torch.rand(4, 112, 16, 16)
+    h_1 = torch.rand(4, 112, 16, 16)
+    h_2 = torch.rand(4, 112, 16, 16)
+    out = ifs(f_1, h_1, h_2)
+    print(out.shape)
