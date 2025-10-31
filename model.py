@@ -161,15 +161,23 @@ class HFE(nn.Module): # Fix out_c = in_c
         offset = self.offset_conv(x_concat)
         return self.out_deformConv(x_concat, offset)
 
-class REC(nn.Module): # In = [N, out_HFE, H, W]
+class REC(nn.Module): # In = [N, out_HFE, H, W] | Out = [N, 1, 2H, 2W]
     def __init__(self, in_c, out_c):
         super().__init__()
-        self.deconv = nn.ConvTranspose2d(in_channels=in_c, out_channels= 64, kernel_size=3, stride=2, padding=1, output_padding=1) # Out = [N, 64, 2H, 2W]
-        self.conv = nn.Conv2d(in_channels=64, out_channels=out_c, kernel_size=3, padding=1) # Out = [N, 1, 2H, 2W]
+        self.rec = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=in_c, out_channels= 64, kernel_size=3, stride=2, padding=1, output_padding=1), # Out = [N, 64, 2H, 2W]
+            nn.PReLU(num_parameters=1, init=0.2),
+            nn.BatchNorm2d(num_features=64),
+            nn.Conv2d(in_channels=64, out_channels=out_c, kernel_size=3, padding=1), # Out = [N, 1, 2H, 2W]
+            nn.BatchNorm2d(num_features=out_c)
+        )
+        # self.deconv = nn.ConvTranspose2d(in_channels=in_c, out_channels= 64, kernel_size=3, stride=2, padding=1, output_padding=1) # Out = [N, 64, 2H, 2W]
+        # self.conv = nn.Conv2d(in_channels=64, out_channels=out_c, kernel_size=3, padding=1) # Out = [N, 1, 2H, 2W]
     
     def forward(self, x):
-        x = self.deconv(x) # Out = [N, 64, 2H, 2W]
-        x = self.conv(x) # Out = [N, 1, 2H, 2W]
+        # x = self.deconv(x) # Out = [N, 64, 2H, 2W]
+        # x = self.conv(x) # Out = [N, 1, 2H, 2W]
+        x = self.rec(x)
         return x            
 
 #--------- IFS's Blocks ----------
