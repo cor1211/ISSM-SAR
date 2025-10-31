@@ -304,8 +304,12 @@ if __name__ == '__main__':
         ffb_down.append(IFS(in_c=336, out_c=336, num_groups=3))
 
     # REC modules
-    rec_up = REC(in_c=336, out_c=1)
-    rec_down = REC(in_c=336, out_c=1)
+    rec_up = []
+    rec_down = []
+    for _ in range(3+1): # num_groups in ffb + out_HFE
+        rec_up.append(REC(in_c=336, out_c=1 ))
+        rec_down.append(REC(in_c=336, out_c=1))
+
 
     # To device
     # pfe_up = pfe_up.to(device)
@@ -332,17 +336,32 @@ if __name__ == '__main__':
     h2 = hfe_down(f2)
     print(f'H2 size: {h2.shape}')
 
-    for idx in range(3):
-        out_up = ffb_up[idx](f1, h1, h2)
-        out_down = ffb_up[idx](f2, h2, h1)
-        
-        h1 = out_up
-        h2 = out_down
+    in_IFS_up = []
+    in_IFS_down = []
     
-    i_up = rec_up(out_up) + input_upsample
-    i_down = rec_down(out_down) + input_upsample
+    in_IFS_up.append(h1)
+    in_IFS_down.append(h2)
 
-    i_out = 0.5*i_up + 0.5*i_down
+    for idx in range(3):
+        out_up = ffb_up[idx](f1, in_IFS_up[idx], in_IFS_down[idx])
+        out_down = ffb_down[idx](f2, in_IFS_down[idx], in_IFS_up[idx])
+        
+        in_IFS_up.append(out_up)
+        in_IFS_down.append(out_down)
+    
+    sr_up = []
+    sr_down = []
+    for idx in range(3+1):
+        sr_up.append(rec_up[idx](in_IFS_up[idx]) + input_upsample)
+        sr_down.append(rec_down[idx](in_IFS_down[idx]) + input_upsample)
+
+    
+    i_out = 0.5*sr_up[-1] + 0.5*sr_down[-1]
     print(f'I_Out size: {i_out.shape}')
+
+    for _ in range(3):
+        print(f'I_up_REC size: {sr_up[_].shape}')
+        print(f'I_down_REC size: {sr_down[_].shape}')
+    
 
     
