@@ -11,11 +11,11 @@ from torchvision.ops import DeformConv2d
 class MultiLooks(nn.Module):
     def __init__(self, in_channel:int = 1):
         super().__init__()
-        self.three_cnn = nn.Sequential(
-            nn.Conv2d(in_channels=in_channel, out_channels=64, kernel_size=3, padding=3//2, stride=1),
+        self.three_cnn = nn.ModuleList()
+        self.three_cnn.extend([nn.Conv2d(in_channels=in_channel, out_channels=64, kernel_size=3, padding=3//2, stride=1),
             nn.Conv2d(in_channels=in_channel, out_channels=32, kernel_size=5, padding=5//2, stride=1),
-            nn.Conv2d(in_channels=in_channel, out_channels=16, kernel_size=7, padding=7//2, stride=1),
-        )
+            nn.Conv2d(in_channels=in_channel, out_channels=16, kernel_size=7, padding=7//2, stride=1),]
+            )
 
     def forward(self, x):
         out_cnns = []
@@ -254,73 +254,69 @@ class IFS(nn.Module):
         
          
 if __name__ == '__main__':
-    # input = torch.rand(16, 1, 256,256)
-    # print(f"Input size: {input.shape}")
-    # layer = MultiLooks(1)
-    # pfe_block = PFE(in_channels=1)
-    # out = pfe_block(input)
-    # print(f'Output size: {out.shape}')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f'Using GPU {torch.cuda.get_device_name(device)}')
+    else:
+        device = torch.device('cpu')
+        print(f'No GPU. Using CPU instead')
 
-    # input1 = torch.rand(1, 1, 2, 2)
-    # print(f"Input size: {input1.shape}")
-    # deconv2d = DeConv2d(1)
-    # out = deconv2d(input1)    
-    # print(f'Output size: {out.shape}')
-    # print(out)
+    # Test forward with lr = [4, 1, 256, 256] and hr=[4, 1, 512, 512]
+ 
+    input = torch.rand(4, 1, 16, 16)
+    print(f'Input size: {input.shape}')
+    # PFE modules
+    pfe_up = PFE(in_channels=1)
+    pfe_down = PFE(in_channels=1)
+    # HFE modules
+    hfe_up = HFE(in_c=336, out_c=336, kernel_size=3)
+    hfe_down = HFE(in_c=336, out_c=336, kernel_size=3)
+    # FFB Modules
+    ffb_up = []
+    ffb_down = []
+    for _ in range(3):
+        ffb_up.append(IFS(in_c=336, out_c=336, num_groups=3))
+        ffb_down.append(IFS(in_c=336, out_c=336, num_groups=3))
+    # REC modules
+    rec_up = REC(in_c=336, out_c=1)
+    rec_down = REC(in_c=336, out_c=1)
 
-    # input2 = torch.rand(1,1,16,16)
-    # print(f"Input size: {input2.shape}")
-    # deformconv2d = DeformConv2dBlock(1)
-    # out = deformconv2d(input2)    
-    # print(f'Output size: {out.shape}')
-    # print(out)
+    # To device
+    # pfe_up = pfe_up.to(device)
+    # pfe_down = pfe_down.to(device)
+    # hfe_up = hfe_up.to(device)
+    # hfe_down = hfe_down.to(device)
+    # ffb_up = [ifs.to(device) for ifs in ffb_up]
+    # ffb_down = [ifs.to(device) for ifs in ffb_down]
+    # rec_up = rec_up.to(device)
+    # rec_down = rec_down.to(device)
+    
+    # Forward
+    input_upsample = F.interpolate(input, scale_factor=2, mode='bilinear', align_corners=False)
+    print(f'Input upsample size: {input_upsample.shape}')
 
-    # input3 = torch.rand(1,336,256,256)
-    # print(f"Input size: {input3.shape}")
-    # trans_deform_block = Deconv_DeformBlock(in_c=336, out_c=336, kernel_size=3)
-    # out = trans_deform_block(input3)    
-    # print(f'Output size: {out[0].shape}, {out[1].shape}')
+    f1= pfe_up(input)
+    print(f'F1 size: {f1.shape}')
+    f2 = pfe_down(input)
+    print(f'F2 size: {f2.shape}')
 
-    # input = torch.rand(4, 1, 16,16)
-    # print(f"Input size: {input.shape}")
+    h1 = hfe_up(f1)
+    print(f'H1 size: {h1.shape}')
 
-    # pfe = PFE(in_channels=1)
-    # hfe = HFE(in_c=336, out_c=336, kernel_size=3)
-    # rec = REC(in_c=336, out_c=1)
+    h2 = hfe_down(f2)
+    print(f'H2 size: {h2.shape}')
+
+    for idx in range(3):
+        out_up = ffb_up[idx](f1, h1, h2)
+        out_down = ffb_up[idx](f2, h2, h1)
+        
+        h1 = out_up
+        h2 = out_down
+    
+    i_up = rec_up(out_up) + input_upsample
+    i_down = rec_down(out_down) + input_upsample
+
+    i_out = 0.5*i_up + 0.5*i_down
+    print(f'I_Out size: {i_out.shape}')
 
     
-    # new_size = (input.shape[2]*2, input.shape[3]*2)
-    # f1 = pfe(input) # Out = [N, 336, H, W]
-    # print(f"F1 size: {f1.shape}")
-    # h1 = hfe(f1) # Out = [N, 32, H, W]
-    # print(f"h1 size: {h1.shape}")   
-    # after_REC = rec(h1) # Out = [N, 1, 2H, 2W]
-    # print(f"after_REC size: {after_REC.shape}")
-
-    # umsampled_tensor = F.interpolate(input, scale_factor=2, align_corners=False, mode='bilinear')
-    # # Skip-connection
-    # after_sum = after_REC + umsampled_tensor
-    # print(f'After_Sum size: {after_sum.shape}') # Out = [N, 1, 2H, 2W]
-
-    # f_1 = torch.rand(4, 112, 16, 16)
-    # f_2 = torch.rand(4, 112, 16, 16)
-    # h_1 = torch.rand(4, 112, 16, 16)
-    # h_2 = torch.rand(4, 112, 16, 16)
-
-    # for _ in range(3):
-    #     ifs_up = IFS(in_c=112, out_c=112, num_groups=3)
-    #     ifs_down = IFS(in_c=112, out_c=112, num_groups=3)
-    #     out_up = ifs_up(f_1, h_1, h_2)
-    #     out_down = ifs_down(f_2, h_2, h_1)
-
-    #     h_1 = out_up
-    #     h_2 = out_down
-
-    
-    # print(out_up.shape)
-    # print(out_down.shape)
-
-    input = torch.rand(4, 112, 16, 16)
-    h_up = HFE(in_c=112, out_c=112, kernel_size=3)
-    h1 = h_up(input)
-    print(h1.shape)
