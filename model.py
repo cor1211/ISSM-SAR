@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import squeeze, transpose, unsqueeze
+# from torch import squeeze, transpose, unsqueeze
 from pytorch_wavelets import DWTForward, DWTInverse
 import math
 from PIL import Image 
@@ -271,9 +271,74 @@ class IFS(nn.Module):
         output = self.compress_out(output) # Out = [N, in_c, H, W]
         return output
 
-# class ISSM_SAR(nn.Module):
-#     def __init__(self, in_channel, out_channel):
-#         super().__init__()
+
+class ISSM_SAR(nn.Module):
+    def __init__(self, in_channel, out_channel, num_ifs):
+        super().__init__()
+        self.num_ifs = num_ifs
+        # PFE Modules
+        self.pfe_up = PFE(in_channels=1)
+        self.pfe_down = PFE(in_channels=1)
+
+        # HFE Modules
+        self.hfe_up = HFE(in_c=336, out_c=336, kernel_size=3)
+        self.hfe_down = HFE(in_c=336, out_c=336, kernel_size=3)
+
+        # FFB Modules
+        self.ffb_up = nn.ModuleList()
+        self.ffb_down = nn.ModuleList()
+
+        # REC Modules
+        self.rec_up = nn.ModuleList()
+        self.rec_down = nn.ModuleList()
+
+        for _ in range(self.num_ifs):
+            self.ffb_up.append(IFS(in_c=336, out_c=336, num_groups=3))
+            self.ffb_down.append(IFS(in_c=336, out_c=336, num_groups=3))
+        
+        for _ in range(self.num_ifs + 1):
+            self.rec_up.append(REC(in_c=336, out_c=1))
+            self.rec_down.append(REC(in_c=336, out_c=1))
+    
+    def forward(self, in_first_time, in_second_time):
+        # Upsample 2 inputs
+        in_ft_upsampled = F.interpolate(in_first_time,scale_factor=2, mode='bilinear', align_corners=False)
+        in_se_upsampled = F.interpolate(in_second_time,scale_factor=2, mode='bilinear', align_corners=False)
+
+        # Pass throught PFE
+        f1 = self.pfe_up(in_first_time)
+        f2 = self.pfe_down(in_second_time)
+
+        # Pass throught HFE
+        h1 = self.hfe_up(f1)
+        h2 = self.hfe_up(f2)
+
+        # Pass throught FFB (each IFSs)
+        in_ifs_up = []
+        in_ifs_down = []
+        in_ifs_up.append(h1)
+        in_ifs_down.append(h2)
+        # Compute out_ifs
+        for idx in range(self.num_ifs):
+            out_ifs_up = self.ffb_up[idx](f1, in_ifs_up[idx], in_ifs_down[idx])
+            out_ifs_down = self.ffb_down[idx](f2, in_ifs_down[idx], in_ifs_up[idx])
+
+            in_ifs_up.append(out_ifs_up)
+            in_ifs_down.append(out_ifs_down)
+
+        # Compute sr (after REC and sum)
+        sr_up = []
+        sr_down = []
+        for idx in range(self.num_ifs+1):
+            sr_up.append(self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled)
+            sr_down.append(self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled)
+        
+        return sr_up, sr_down
+
+
+
+
+        
         
          
 if __name__ == '__main__':
@@ -284,31 +349,40 @@ if __name__ == '__main__':
         device = torch.device('cpu')
         print(f'No GPU. Using CPU instead')
 
+    issm_sar = ISSM_SAR(in_channel=1, out_channel=1, num_ifs=3)
+    input_first_time = torch.rand(2, 1, 16,16)
+    input_second_time = torch.rand(2, 1, 16,16)
+
+    sr_up, sr_down = issm_sar(input_first_time, input_second_time)
+    
+    for idx in range(4):
+        print(sr_up[idx].shape, sr_down[idx].shape)
+        
     # Test forward with lr = [4, 1, 256, 256] and hr=[4, 1, 512, 512]
-    input = torch.rand(4, 1, 16, 16)
-    print(f'Input size: {input.shape}')
+    # input = torch.rand(4, 1, 64, 64)
+    # print(f'Input size: {input.shape}')
 
-    # PFE modules
-    pfe_up = PFE(in_channels=1)
-    pfe_down = PFE(in_channels=1)
+    # # PFE modules
+    # pfe_up = PFE(in_channels=1)
+    # pfe_down = PFE(in_channels=1)
 
-    # HFE modules
-    hfe_up = HFE(in_c=336, out_c=336, kernel_size=3)
-    hfe_down = HFE(in_c=336, out_c=336, kernel_size=3)
+    # # HFE modules
+    # hfe_up = HFE(in_c=336, out_c=336, kernel_size=3)
+    # hfe_down = HFE(in_c=336, out_c=336, kernel_size=3)
 
-    # FFB Modules
-    ffb_up = []
-    ffb_down = []
-    for _ in range(3):
-        ffb_up.append(IFS(in_c=336, out_c=336, num_groups=3))
-        ffb_down.append(IFS(in_c=336, out_c=336, num_groups=3))
+    # # FFB Modules
+    # ffb_up = []
+    # ffb_down = []
+    # for _ in range(3):
+    #     ffb_up.append(IFS(in_c=336, out_c=336, num_groups=3))
+    #     ffb_down.append(IFS(in_c=336, out_c=336, num_groups=3))
 
-    # REC modules
-    rec_up = []
-    rec_down = []
-    for _ in range(3+1): # num_groups in ffb + out_HFE
-        rec_up.append(REC(in_c=336, out_c=1 ))
-        rec_down.append(REC(in_c=336, out_c=1))
+    # # REC modules
+    # rec_up = []
+    # rec_down = []
+    # for _ in range(3+1): # num_groups in ffb + out_HFE
+    #     rec_up.append(REC(in_c=336, out_c=1 ))
+    #     rec_down.append(REC(in_c=336, out_c=1))
 
 
     # To device
@@ -322,46 +396,45 @@ if __name__ == '__main__':
     # rec_down = rec_down.to(device)
     
     # Forward
-    input_upsample = F.interpolate(input, scale_factor=2, mode='bilinear', align_corners=False)
-    print(f'Input upsample size: {input_upsample.shape}')
+    # input_upsample = F.interpolate(input, scale_factor=2, mode='bilinear', align_corners=False)
+    # print(f'Input upsample size: {input_upsample.shape}')
 
-    f1= pfe_up(input)
-    print(f'F1 size: {f1.shape}')
-    f2 = pfe_down(input)
-    print(f'F2 size: {f2.shape}')
+    # f1= pfe_up(input)
+    # print(f'F1 size: {f1.shape}')
+    # f2 = pfe_down(input)
+    # print(f'F2 size: {f2.shape}')
 
-    h1 = hfe_up(f1)
-    print(f'H1 size: {h1.shape}')
+    # h1 = hfe_up(f1)
+    # print(f'H1 size: {h1.shape}')
 
-    h2 = hfe_down(f2)
-    print(f'H2 size: {h2.shape}')
+    # h2 = hfe_down(f2)
+    # print(f'H2 size: {h2.shape}')
 
-    in_IFS_up = []
-    in_IFS_down = []
+    # in_IFS_up = []
+    # in_IFS_down = []
     
-    in_IFS_up.append(h1)
-    in_IFS_down.append(h2)
+    # in_IFS_up.append(h1)
+    # in_IFS_down.append(h2)
 
-    for idx in range(3):
-        out_up = ffb_up[idx](f1, in_IFS_up[idx], in_IFS_down[idx])
-        out_down = ffb_down[idx](f2, in_IFS_down[idx], in_IFS_up[idx])
+    # for idx in range(3):
+    #     out_up = ffb_up[idx](f1, in_IFS_up[idx], in_IFS_down[idx])
+    #     out_down = ffb_down[idx](f2, in_IFS_down[idx], in_IFS_up[idx])
         
-        in_IFS_up.append(out_up)
-        in_IFS_down.append(out_down)
+    #     in_IFS_up.append(out_up)
+    #     in_IFS_down.append(out_down)
     
-    sr_up = []
-    sr_down = []
-    for idx in range(3+1):
-        sr_up.append(rec_up[idx](in_IFS_up[idx]) + input_upsample)
-        sr_down.append(rec_down[idx](in_IFS_down[idx]) + input_upsample)
+    # sr_up = []
+    # sr_down = []
+    # for idx in range(3+1):
+    #     sr_up.append(rec_up[idx](in_IFS_up[idx]) + input_upsample)
+    #     sr_down.append(rec_down[idx](in_IFS_down[idx]) + input_upsample)
+
+    # i_out = 0.5*sr_up[-1] + 0.5*sr_down[-1]
+    # print(f'I_Out size: {i_out.shape}')
+
+    # for _ in range(3):
+    #     print(f'I_up_REC size: {sr_up[_].shape}')
+    #     print(f'I_down_REC size: {sr_down[_].shape}')
 
     
-    i_out = 0.5*sr_up[-1] + 0.5*sr_down[-1]
-    print(f'I_Out size: {i_out.shape}')
-
-    for _ in range(3):
-        print(f'I_up_REC size: {sr_up[_].shape}')
-        print(f'I_down_REC size: {sr_down[_].shape}')
-    
-
     
