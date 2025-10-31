@@ -12,9 +12,24 @@ class MultiLooks(nn.Module):
     def __init__(self, in_channel:int = 1):
         super().__init__()
         self.three_cnn = nn.ModuleList()
-        self.three_cnn.extend([nn.Conv2d(in_channels=in_channel, out_channels=64, kernel_size=3, padding=3//2, stride=1),
-            nn.Conv2d(in_channels=in_channel, out_channels=32, kernel_size=5, padding=5//2, stride=1),
-            nn.Conv2d(in_channels=in_channel, out_channels=16, kernel_size=7, padding=7//2, stride=1),]
+        self.three_cnn.extend(
+            [
+                nn.Sequential(
+                    nn.Conv2d(in_channels=in_channel, out_channels=64, kernel_size=3, padding=3//2, stride=1),
+                    nn.ReLU(True),
+                    nn.BatchNorm2d(num_features=64)
+                    ),
+                nn.Sequential(
+                    nn.Conv2d(in_channels=in_channel, out_channels=32, kernel_size=5, padding=5//2, stride=1),
+                    nn.ReLU(True),
+                    nn.BatchNorm2d(num_features=32)
+                    ),
+                nn.Sequential(
+                    nn.Conv2d(in_channels=in_channel, out_channels=16, kernel_size=7, padding=7//2, stride=1),
+                    nn.ReLU(True),
+                    nn.BatchNorm2d(num_features=16)
+                    ),
+            ]
             )
 
     def forward(self, x):
@@ -262,21 +277,24 @@ if __name__ == '__main__':
         print(f'No GPU. Using CPU instead')
 
     # Test forward with lr = [4, 1, 256, 256] and hr=[4, 1, 512, 512]
- 
     input = torch.rand(4, 1, 16, 16)
     print(f'Input size: {input.shape}')
+
     # PFE modules
     pfe_up = PFE(in_channels=1)
     pfe_down = PFE(in_channels=1)
+
     # HFE modules
     hfe_up = HFE(in_c=336, out_c=336, kernel_size=3)
     hfe_down = HFE(in_c=336, out_c=336, kernel_size=3)
+
     # FFB Modules
     ffb_up = []
     ffb_down = []
     for _ in range(3):
         ffb_up.append(IFS(in_c=336, out_c=336, num_groups=3))
         ffb_down.append(IFS(in_c=336, out_c=336, num_groups=3))
+
     # REC modules
     rec_up = REC(in_c=336, out_c=1)
     rec_down = REC(in_c=336, out_c=1)
