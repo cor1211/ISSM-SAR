@@ -65,9 +65,9 @@ class PFE(nn.Module):
         self.first_way = MultiLooks(in_channel=in_channels) # Out = [N, 112, H, W]
 
         self.second_way = nn.Sequential(
-            # nn.Upsample(scale_factor=0.5, mode='bicubic', align_corners=False), # Out = [H//2, W//2]
+            nn.Upsample(scale_factor=0.5, mode='bilinear', align_corners=False), # Out = [H//2, W//2]
             MultiLooks(in_channel=in_channels), # Out = [N, 112, H//2, W//2]
-            # nn.Upsample(scale_factor=2, mode='bicubic', align_corners=False), # Out = [H, W]
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False), # Out = [H, W]
 
         )   
         self.third_way = nn.Sequential(
@@ -79,20 +79,9 @@ class PFE(nn.Module):
         
     def forward(self, x):
         outs_way = []
-        for idx, way in enumerate(self.pfe):
+        for way in self.pfe:
             # print(idx, way)
-            if idx == 1:
-                N, C, H, W = x.size()
-                # print(1, N, C, H, W)    
-                out_second_way = Resize(size = (H//2, W//2), interpolation=InterpolationMode.BICUBIC)(x)
-                # print(2, x.size())
-                out_second_way = way(out_second_way)
-                # print(3, x.size())
-                out_second_way = Resize(size = (H, W), interpolation=InterpolationMode.BICUBIC)(out_second_way)
-                # print(4, x.size())
-                outs_way.append(out_second_way)
-            else:
-                outs_way.append(way(x))
+            outs_way.append(way(x))
 
         after_relu =  nn.ReLU(True)(torch.concat(outs_way, dim=1))
         return ECA(in_c=after_relu.size()[1])(after_relu)
@@ -313,20 +302,25 @@ if __name__ == '__main__':
     # after_sum = after_REC + umsampled_tensor
     # print(f'After_Sum size: {after_sum.shape}') # Out = [N, 1, 2H, 2W]
 
-    f_1 = torch.rand(4, 112, 16, 16)
-    f_2 = torch.rand(4, 112, 16, 16)
-    h_1 = torch.rand(4, 112, 16, 16)
-    h_2 = torch.rand(4, 112, 16, 16)
+    # f_1 = torch.rand(4, 112, 16, 16)
+    # f_2 = torch.rand(4, 112, 16, 16)
+    # h_1 = torch.rand(4, 112, 16, 16)
+    # h_2 = torch.rand(4, 112, 16, 16)
 
-    for _ in range(3):
-        ifs_up = IFS(in_c=112, out_c=112, num_groups=3)
-        ifs_down = IFS(in_c=112, out_c=112, num_groups=3)
-        out_up = ifs_up(f_1, h_1, h_2)
-        out_down = ifs_down(f_2, h_2, h_1)
+    # for _ in range(3):
+    #     ifs_up = IFS(in_c=112, out_c=112, num_groups=3)
+    #     ifs_down = IFS(in_c=112, out_c=112, num_groups=3)
+    #     out_up = ifs_up(f_1, h_1, h_2)
+    #     out_down = ifs_down(f_2, h_2, h_1)
 
-        h_1 = out_up
-        h_2 = out_down
+    #     h_1 = out_up
+    #     h_2 = out_down
 
     
-    print(out_up.shape)
-    print(out_down.shape)
+    # print(out_up.shape)
+    # print(out_down.shape)
+
+    input = torch.rand(4, 112, 16, 16)
+    h_up = HFE(in_c=112, out_c=112, kernel_size=3)
+    h1 = h_up(input)
+    print(h1.shape)
