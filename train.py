@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, ToTensor, Normalize
 from tqdm import tqdm
 from torch.optim import Adam
+from metrics import psnr_torch, ssim_torch
 # from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 # from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
 
@@ -80,25 +81,25 @@ if __name__ =='__main__':
         
         print(f"Epoch [{epoch+1}/{5}], Loss_avg: {(loss_show/num_iter_train):.5f}") # Print average loss of epoch
         
-        # # Valid
-        # model.eval()
-        # tqdm_test_loader = tqdm(test_loader)
-        # psnr_value = 0
-        # ssim_value = 0
-        # with torch.no_grad():
-        #     for iter, ((lr1, lr2), hr) in enumerate(tqdm_test_loader):
-        #         lr1, lr2, hr = lr1.to(device), lr2.to(device), hr.to(device)
-        #         sr_up, sr_down = model(lr1, lr2)
-        #         sr_fusion = 0.5*sr_up[-1] + 0.5+sr_down[-1]
-        #         # Normalize from [-1, 1] -> [0, 1]
-        #         hr = ((hr*0.5)+0.5).clamp(0,1)
-        #         sr_fusion = ((sr_fusion*0.5)+0.5).clamp(0,1)
+        # Valid
+        model.eval()
+        tqdm_test_loader = tqdm(test_loader)
+        psnr_value = 0
+        ssim_value = 0
+        with torch.no_grad():
+            for iter, ((lr1, lr2), hr) in enumerate(tqdm_test_loader):
+                lr1, lr2, hr = lr1.to(device), lr2.to(device), hr.to(device)
+                sr_up, sr_down = model(lr1, lr2)
+                sr_fusion = 0.5*sr_up[-1] + 0.5*sr_down[-1]
+                # Normalize from [-1, 1] -> [0, 1]
+                hr = ((hr*0.5)+0.5).clamp(0,1)
+                sr_fusion = ((sr_fusion*0.5)+0.5).clamp(0,1)
 
-        #         # Calculate metrics
-        #         psnr_value+= psnr_metric(sr_fusion, hr).item()
-        #         ssim_value+= ssim_metric(sr_fusion, hr).item()
+                # Calculate metrics
+                psnr_value+= psnr_torch(sr_fusion, hr).item()
+                ssim_value+= ssim_torch(sr_fusion, hr).item()
 
-        #     print(f'Epoch [{epoch+1}/{5}]\nPSNR: {psnr_value:.3f} dB\n SSIM: {ssim_value:.3f}')
+            print(f'Epoch [{epoch+1}/{5}]\nPSNR: {psnr_value/num_iter_test:.3f} dB\n SSIM: {ssim_value/num_iter_test:.3f}')
 
 
 
