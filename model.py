@@ -7,6 +7,7 @@ import math
 from PIL import Image 
 from torchvision.transforms import Resize,ToTensor, InterpolationMode
 from torchvision.ops import DeformConv2d
+from torchinfo import summary
 # Khoi 3 CNN
 class MultiLooks(nn.Module):
     def __init__(self, in_channel:int = 1):
@@ -15,19 +16,19 @@ class MultiLooks(nn.Module):
         self.three_cnn.extend(
             [
                 nn.Sequential(
-                    nn.Conv2d(in_channels=in_channel, out_channels=64, kernel_size=3, padding=3//2, stride=1),
+                    nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=3, padding=3//2, stride=1),
                     nn.ReLU(True),
-                    nn.BatchNorm2d(num_features=64)
+                    nn.BatchNorm2d(num_features=4)
                     ),
                 nn.Sequential(
-                    nn.Conv2d(in_channels=in_channel, out_channels=32, kernel_size=5, padding=5//2, stride=1),
+                    nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=5, padding=5//2, stride=1),
                     nn.ReLU(True),
-                    nn.BatchNorm2d(num_features=32)
+                    nn.BatchNorm2d(num_features=4)
                     ),
                 nn.Sequential(
-                    nn.Conv2d(in_channels=in_channel, out_channels=16, kernel_size=7, padding=7//2, stride=1),
+                    nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=7, padding=7//2, stride=1),
                     nn.ReLU(True),
-                    nn.BatchNorm2d(num_features=16)
+                    nn.BatchNorm2d(num_features=4)
                     ),
             ]
             )
@@ -92,7 +93,7 @@ class PFE(nn.Module):
 
         self.pfe = nn.Sequential(self.first_way, self.second_way, self.third_way)
         
-        self.eca = ECA(336)
+        self.eca = ECA(36)
     def forward(self, x):
         outs_way = []
         for way in self.pfe:
@@ -282,8 +283,8 @@ class ISSM_SAR(nn.Module):
         self.pfe_down = PFE(in_channels=1)
 
         # HFE Modules
-        self.hfe_up = HFE(in_c=336, out_c=336, kernel_size=3)
-        self.hfe_down = HFE(in_c=336, out_c=336, kernel_size=3)
+        self.hfe_up = HFE(in_c=36, out_c=36, kernel_size=3)
+        self.hfe_down = HFE(in_c=36, out_c=36, kernel_size=3)
 
         # FFB Modules
         self.ffb_up = nn.ModuleList()
@@ -294,12 +295,12 @@ class ISSM_SAR(nn.Module):
         self.rec_down = nn.ModuleList()
 
         for _ in range(self.num_ifs):
-            self.ffb_up.append(IFS(in_c=336, out_c=336, num_groups=3))
-            self.ffb_down.append(IFS(in_c=336, out_c=336, num_groups=3))
+            self.ffb_up.append(IFS(in_c=36, out_c=36, num_groups=3))
+            self.ffb_down.append(IFS(in_c=36, out_c=36, num_groups=3))
         
         for _ in range(self.num_ifs + 1):
-            self.rec_up.append(REC(in_c=336, out_c=1))
-            self.rec_down.append(REC(in_c=336, out_c=1))
+            self.rec_up.append(REC(in_c=36, out_c=1))
+            self.rec_down.append(REC(in_c=36, out_c=1))
     
     def forward(self, in_first_time, in_second_time):
         # Upsample 2 inputs
@@ -336,10 +337,6 @@ class ISSM_SAR(nn.Module):
         
         return sr_up, sr_down
 
-
-
-
-        
         
          
 if __name__ == '__main__':
@@ -351,14 +348,15 @@ if __name__ == '__main__':
         print(f'No GPU. Using CPU instead')
 
     issm_sar = ISSM_SAR(in_channel=1, out_channel=1, num_ifs=3).to(device)
-    input_first_time = torch.rand(2, 1, 16,16).to(device)
-    input_second_time = torch.rand(2, 1, 16,16).to(device)
+    input_first_time = torch.rand(4, 1, 128,128).to(device)
+    input_second_time = torch.rand(4, 1, 128,128).to(device)
 
     sr_up, sr_down = issm_sar(input_first_time, input_second_time)
     
     for idx in range(4):
         print(sr_up[idx].shape, sr_down[idx].shape)
-        
+    
+    summary(issm_sar, input_size=[(4,1, 128,128),(4,1,128,128)])
     # Test forward with lr = [4, 1, 256, 256] and hr=[4, 1, 512, 512]
     # input = torch.rand(4, 1, 64, 64)
     # print(f'Input size: {input.shape}')
