@@ -92,6 +92,7 @@ class PFE(nn.Module):
 
         self.pfe = nn.Sequential(self.first_way, self.second_way, self.third_way)
         
+        self.eca = ECA(336)
     def forward(self, x):
         outs_way = []
         for way in self.pfe:
@@ -99,7 +100,7 @@ class PFE(nn.Module):
             outs_way.append(way(x))
 
         after_relu =  nn.ReLU(True)(torch.concat(outs_way, dim=1))
-        return ECA(in_c=after_relu.size()[1])(after_relu)
+        return self.eca(after_relu)
 
 # Deconv2d Block
 # class DeConv2d(nn.Module):
@@ -349,9 +350,9 @@ if __name__ == '__main__':
         device = torch.device('cpu')
         print(f'No GPU. Using CPU instead')
 
-    issm_sar = ISSM_SAR(in_channel=1, out_channel=1, num_ifs=3)
-    input_first_time = torch.rand(2, 1, 16,16)
-    input_second_time = torch.rand(2, 1, 16,16)
+    issm_sar = ISSM_SAR(in_channel=1, out_channel=1, num_ifs=3).to(device)
+    input_first_time = torch.rand(2, 1, 16,16).to(device)
+    input_second_time = torch.rand(2, 1, 16,16).to(device)
 
     sr_up, sr_down = issm_sar(input_first_time, input_second_time)
     
