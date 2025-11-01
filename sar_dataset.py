@@ -34,7 +34,7 @@ class SarDataset(Dataset):
             lr_time_2 = self.transform(lr_time_2)
             hr= self.transform(hr)
 
-        return path, (lr_time_1, lr_time_2), hr
+        return  (lr_time_1, lr_time_2), hr
         
 
 if __name__ == '__main__':
@@ -48,14 +48,13 @@ if __name__ == '__main__':
 
     dataset = SarDataset(root=r'/mnt/data1tb/vinh/ISSM-SAR/dataset', train=True, transform=transform)
     print(len(dataset))
-    path_origin, (lr_1, lr_2), hr = dataset[0]
+    (lr_1, lr_2), hr = dataset[100]
     print(lr_1.shape, hr.shape)
     # convert tensors back to PIL images (undo Normalize) and show
     to_pil = ToPILImage()
     def unnormalize(t):
         return (t * 0.5) + 0.5
 
-    print(path_origin)
     pil_lr_1 = to_pil(unnormalize(lr_1))
     pil_lr_2 = to_pil(unnormalize(lr_2))
     pil_hr = to_pil(unnormalize(hr))
