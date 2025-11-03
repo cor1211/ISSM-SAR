@@ -126,11 +126,11 @@ class PFE(nn.Module):
 #         return x
 
 class Deconv_DeformBlock(nn.Module):
-    def __init__(self, in_c, kernel_size):
+    def __init__(self, in_c, kernel_size, padding, stride):
         super().__init__()
-        self.deconv = nn.ConvTranspose2d(in_channels=in_c, out_channels=64, kernel_size=kernel_size, stride=1, padding=1)
-        self.deformconv = DeformConv2d(in_channels=64, out_channels=in_c, kernel_size=kernel_size, padding=kernel_size//2)
-        self.offset_conv = nn.Conv2d(in_channels=64, out_channels=2 * kernel_size*kernel_size, kernel_size=kernel_size, padding=kernel_size//2)
+        self.deconv = nn.ConvTranspose2d(in_channels=in_c, out_channels=in_c, kernel_size=kernel_size, stride=stride, padding=padding)
+        self.deformconv = DeformConv2d(in_channels=in_c, out_channels=in_c, kernel_size=kernel_size, padding=padding, stride=stride)
+        self.offset_conv = nn.Conv2d(in_channels=in_c, out_channels=2 * kernel_size*kernel_size, kernel_size=kernel_size, padding=padding, stride =stride)
 
     def forward(self, x): # In = [N, 336, H, W]
         out_block = self.deconv(x)  # Out = [N, 64, H', W'] (H' = H, W' = W)
@@ -139,15 +139,35 @@ class Deconv_DeformBlock(nn.Module):
         out_block = self.deformconv(out_block, offset) # Out = [N, in_c, H', W']
         out_block = nn.ReLU(True)(out_block) # Out = [N, in_c, H', W']
         return out_block            
-            
+
+class DeFormBlock(nn.Module):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride):
+        super().__init__()
+        self.deform = DeformConv2d(in_channels=in_c, out_c=out_c, kernel_size=kernel_size, stride=stride, padding=padding)
+        self.offset_conv = nn.Conv2d(in_channels=in_c, out_channels=2*kernel_size*kernel_size, padding=padding, stride=stride, kernel_size=kernel_size)
+        self.bn = nn.BatchNorm2d(num_features=out_c)
+        self.act = nn.ReLU(True)
+        
+    def forward(self, x):
+        offset = self.offset_conv(x)
+        x = self.deform(x, offset)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+                
 class HFE(nn.Module): # Fix out_c = in_c
-    def __init__(self, in_c, out_c, kernel_size):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride, num_blocks):
         super().__init__()
         self.in_block = Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size)
         self.blocks = nn.ModuleList()
-        for _ in range(3):
-            self.blocks.append(Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size))
+        for _ in range(num_blocks):
+            self.blocks.append(DeConvBlock(in_c=in_c, out_c=out_c, kernel_size=kernel_size, padding=padding, stride=stride))
+            self.blocks.append(DeFormBlock(in_c=in_c, out_c=out_c, kernel_size=kernel_size, padding=padding, stride = stride))
         
+        self.down_channel_blocks = nn.ModuleList()
+        for _ in range(num_blocks-2):
+            
+
         self.offset_conv = nn.Conv2d(in_channels=in_c + in_c, out_channels=2 * kernel_size*kernel_size, kernel_size=kernel_size, padding=kernel_size//2)
         self.out_deformConv = DeformConv2d(in_channels=in_c + in_c, out_channels=out_c, kernel_size=kernel_size, padding=kernel_size//2) # Note: last block have input concat with in_module, so in_channels = 2*in_c
 
@@ -206,6 +226,8 @@ class ConvBlock(nn.Module):
     def forward(self, x):
         x = self.conv(x)
         return x
+
+
 
 # ----- Build IFS Block ------
 class IFS(nn.Module):
