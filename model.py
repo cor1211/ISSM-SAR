@@ -8,6 +8,7 @@ from PIL import Image
 from torchvision.transforms import Resize,ToTensor, InterpolationMode
 from torchvision.ops import DeformConv2d
 from torchinfo import summary
+
 # Khoi 3 CNN
 class MultiLooks(nn.Module):
     def __init__(self, in_channel:int = 1):
@@ -17,18 +18,18 @@ class MultiLooks(nn.Module):
             [
                 nn.Sequential(
                     nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=3, padding=3//2, stride=1),
+                    nn.BatchNorm2d(num_features=4),
                     nn.ReLU(True),
-                    nn.BatchNorm2d(num_features=4)
                     ),
                 nn.Sequential(
                     nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=5, padding=5//2, stride=1),
+                    nn.BatchNorm2d(num_features=4),
                     nn.ReLU(True),
-                    nn.BatchNorm2d(num_features=4)
                     ),
                 nn.Sequential(
                     nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=7, padding=7//2, stride=1),
+                    nn.BatchNorm2d(num_features=4),
                     nn.ReLU(True),
-                    nn.BatchNorm2d(num_features=4)
                     ),
             ]
             )
@@ -167,15 +168,12 @@ class REC(nn.Module): # In = [N, out_HFE, H, W] | Out = [N, 1, 2H, 2W]
     def __init__(self, in_c, out_c):
         super().__init__()
         self.rec = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=in_c, out_channels= 64, kernel_size=3, stride=2, padding=1, output_padding=1), # Out = [N, 64, 2H, 2W]
+            nn.ConvTranspose2d(in_channels=in_c, out_channels= in_c, kernel_size=6, stride=2, padding=2), # Out = [N, 64, 2H, 2W]
+            nn.BatchNorm2d(num_features=in_c),
             nn.PReLU(num_parameters=1, init=0.2),
-            nn.BatchNorm2d(num_features=64),
-            nn.Conv2d(in_channels=64, out_channels=out_c, kernel_size=3, padding=1), # Out = [N, 1, 2H, 2W]
+            nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=3, padding=1), # Out = [N, 1, 2H, 2W]
             nn.BatchNorm2d(num_features=out_c)
         )
-        # self.deconv = nn.ConvTranspose2d(in_channels=in_c, out_channels= 64, kernel_size=3, stride=2, padding=1, output_padding=1) # Out = [N, 64, 2H, 2W]
-        # self.conv = nn.Conv2d(in_channels=64, out_channels=out_c, kernel_size=3, padding=1) # Out = [N, 1, 2H, 2W]
-    
     def forward(self, x):
         # x = self.deconv(x) # Out = [N, 64, 2H, 2W]
         # x = self.conv(x) # Out = [N, 1, 2H, 2W]
@@ -188,8 +186,8 @@ class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow sc
         super().__init__()
         self.deconv = nn.Sequential(
             nn.ConvTranspose2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
-            nn.PReLU(num_parameters=1, init=0.2),
             nn.BatchNorm2d(num_features=out_c),
+            nn.PReLU(num_parameters=1, init=0.2),
         )
 
     def forward(self, x):
@@ -201,8 +199,8 @@ class ConvBlock(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
-            nn.PReLU(num_parameters=1, init=0.2),
             nn.BatchNorm2d(num_features=out_c),
+            nn.PReLU(num_parameters=1, init=0.2),
         )
 
     def forward(self, x):
@@ -320,6 +318,7 @@ class ISSM_SAR(nn.Module):
         in_ifs_down = []
         in_ifs_up.append(h1)
         in_ifs_down.append(h2)
+
         # Compute out_ifs
         for idx in range(self.num_ifs):
             out_ifs_up = self.ffb_up[idx](f1, in_ifs_up[idx], in_ifs_down[idx])
@@ -357,6 +356,7 @@ if __name__ == '__main__':
         print(sr_up[idx].shape, sr_down[idx].shape)
     
     summary(issm_sar, input_size=[(4,1, 128,128),(4,1,128,128)])
+    
     # Test forward with lr = [4, 1, 256, 256] and hr=[4, 1, 512, 512]
     # input = torch.rand(4, 1, 64, 64)
     # print(f'Input size: {input.shape}')
