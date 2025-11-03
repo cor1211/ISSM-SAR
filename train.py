@@ -7,11 +7,14 @@ from torchvision.transforms import Compose, ToTensor, Normalize
 from tqdm import tqdm
 from torch.optim import Adam
 from metrics import psnr_torch, ssim_torch
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 # from torchmetrics.image import PeakSignalNoiseRatio as PSNR
 # from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
 
 
 if __name__ =='__main__':
+    # Check cuda available and use
     if torch.cuda.is_available():
         device = torch.device('cuda')
         print(f'Using GPU {torch.cuda.get_device_name("cuda")}')
@@ -24,6 +27,10 @@ if __name__ =='__main__':
         Normalize(mean = [0.5],
                 std=[0.5])
     ])
+
+    # Init writer log
+    log_dir = f"runs/exp_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    writer = SummaryWriter(log_dir)
 
     # Train, test set
     train_set= SarDataset(root = r'/mnt/data1tb/vinh/ISSM-SAR/dataset', train=True, transform=transform)
@@ -52,11 +59,7 @@ if __name__ =='__main__':
     model = ISSM_SAR(in_channel=1, out_channel=1, num_ifs=3).to(device)
     optimizer = Adam(model.parameters(), lr=1e-6)
 
-    # Metrics validation
-    # psnr_metric = PSNR(data_range=1.0).to(device)
-    # ssim_metric = SSIM(data_range=1.0).to(device)
-
-    for epoch in range(5):
+    for epoch in range(15):
         torch.cuda.empty_cache()
         model.train()
         loss_show = 0.0
@@ -84,8 +87,8 @@ if __name__ =='__main__':
         # Valid
         model.eval()
         tqdm_test_loader = tqdm(test_loader)
-        psnr_value = 0
-        ssim_value = 0
+        psnr_all = 0
+        ssim_all = 0
         with torch.no_grad():
             for iter, ((lr1, lr2), hr) in enumerate(tqdm_test_loader):
                 lr1, lr2, hr = lr1.to(device), lr2.to(device), hr.to(device)
@@ -96,10 +99,18 @@ if __name__ =='__main__':
                 sr_fusion = ((sr_fusion*0.5)+0.5).clamp(0,1)
 
                 # Calculate metrics
-                psnr_value+= psnr_torch(sr_fusion, hr).item()
-                ssim_value+= ssim_torch(sr_fusion, hr).item()
-
-            print(f'Epoch [{epoch+1}/{5}]\nPSNR: {psnr_value/num_iter_test:.3f} dB\n SSIM: {ssim_value/num_iter_test:.3f}')
+                psnr_iter= psnr_torch(sr_fusion, hr).item()
+                ssim_iter= ssim_torch(sr_fusion, hr).item()
+                psnr_all += psnr_iter
+                ssim_all += ssim_iter
+            print(f'Epoch [{epoch+1}/{5}]\nPSNR: {psnr_all/num_iter_test:.3f} dB\n SSIM: {ssim_all/num_iter_test:.3f}')
+        
+        # logging
+        writer.add_scalar(tag='Loss/train', scalar_value=loss_show/num_iter_train, global_step=epoch)
+        writer.add_scalar(tag='Metrics/PSNR', scalar_value=psnr_all/num_iter_test, global_step=epoch)
+        writer.add_scalar(tag='Metrics/SSIM', scalar_value=ssim_all/num_iter_test, global_step=epoch)
+    
+    writer.close() # Close
 
 
 
