@@ -141,12 +141,15 @@ class Deconv_DeformBlock(nn.Module):
         return out_block            
 
 class DeFormBlock(nn.Module):
-    def __init__(self, in_c, out_c, kernel_size, padding, stride):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type):
         super().__init__()
-        self.deform = DeformConv2d(in_channels=in_c, out_c=out_c, kernel_size=kernel_size, stride=stride, padding=padding)
+        self.deform = DeformConv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding)
         self.offset_conv = nn.Conv2d(in_channels=in_c, out_channels=2*kernel_size*kernel_size, padding=padding, stride=stride, kernel_size=kernel_size)
         self.bn = nn.BatchNorm2d(num_features=out_c)
-        self.act = nn.ReLU(True)
+        if act_type.lower() =='prelu':
+            self.act = nn.PReLU(num_parameters=1, init=0.2)
+        else:
+            self.act = nn.ReLU(True)
         
     def forward(self, x):
         offset = self.offset_conv(x)
@@ -158,31 +161,43 @@ class DeFormBlock(nn.Module):
 class HFE(nn.Module): # Fix out_c = in_c
     def __init__(self, in_c, out_c, kernel_size, padding, stride, num_blocks):
         super().__init__()
-        self.in_block = Deconv_DeformBlock(in_c=in_c, kernel_size=kernel_size)
+        self.num_blocks = num_blocks
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
-            self.blocks.append(DeConvBlock(in_c=in_c, out_c=out_c, kernel_size=kernel_size, padding=padding, stride=stride))
-            self.blocks.append(DeFormBlock(in_c=in_c, out_c=out_c, kernel_size=kernel_size, padding=padding, stride = stride))
-        
+            self.blocks.append(nn.Sequential(
+                DeConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='relu'),
+                DeFormBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride = stride, act_type='relu')
+            ))
+
         self.down_channel_blocks = nn.ModuleList()
         for _ in range(num_blocks-2):
-            
+            self.down_channel_blocks.append(ConvBlock(in_c=2*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0, act_type='relu'))
 
-        self.offset_conv = nn.Conv2d(in_channels=in_c + in_c, out_channels=2 * kernel_size*kernel_size, kernel_size=kernel_size, padding=kernel_size//2)
-        self.out_deformConv = DeformConv2d(in_channels=in_c + in_c, out_channels=out_c, kernel_size=kernel_size, padding=kernel_size//2) # Note: last block have input concat with in_module, so in_channels = 2*in_c
+        self.last_deform = DeFormBlock(in_c=2*in_c, out_c=out_c, kernel_size=3, padding=1, stride=1, act_type='relu') # Not change H, W
 
     def forward(self, x):
         in_module = x # In = [N, 336, H, W]
-        x = self.in_block(x) # Out = [N, 336, H, W]
-        in_previous_block = torch.zeros_like(x) # [N, 336, H, W]
         
-        for block in self.blocks:
-            in_cur_block = x + in_previous_block
-            x = block(in_cur_block) # Out = [N, 336, H, W]
-            in_previous_block = in_cur_block
+        # x = self.in_block(x) # Out = [N, 336, H, W]
+        # in_previous_block = torch.zeros_like(x) # [N, 336, H, W]
+        # 
+        # for block in self.blocks:
+            # in_cur_block = x + in_previous_block
+            # x = block(in_cur_block) # Out = [N, 336, H, W]
+            # in_previous_block = in_cur_block
+        
+        outs = []
+        for idx in range(self.num_blocks):
+            just_out = self.blocks[idx](x)
+            outs.append(just_out)
+            if idx > 0 and idx != self.num_blocks-1:
+                x = torch.concat((just_out, outs[idx-1]), dim = 1) # Concat
+                x = self.down_channel_blocks[idx-1](x) # Down_channel after concat
+            else: 
+                x = just_out
+
         x_concat = torch.concat((x, in_module), dim=1)
-        offset = self.offset_conv(x_concat)
-        return self.out_deformConv(x_concat, offset)
+        return self.last_deform(x_concat)
 
 class REC(nn.Module): # In = [N, out_HFE, H, W] | Out = [N, 1, 2H, 2W]
     def __init__(self, in_c, out_c):
@@ -202,26 +217,32 @@ class REC(nn.Module): # In = [N, out_HFE, H, W] | Out = [N, 1, 2H, 2W]
 
 #--------- IFS's Blocks ----------
 class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow scale_factor x2
-    def __init__(self, in_c, out_c, kernel_size, padding, stride):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu'):
         super().__init__()
         self.deconv = nn.Sequential(
             nn.ConvTranspose2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
             nn.BatchNorm2d(num_features=out_c),
-            nn.PReLU(num_parameters=1, init=0.2),
         )
+        if act_type.lower() =='prelu':
+            self.deconv.append(nn.PReLU(num_parameters=1, init=0.2))
+        else:
+            self.deconv.append(nn.ReLU(True))
 
     def forward(self, x):
         x = self.deconv(x)
         return x
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_c, out_c, kernel_size, padding, stride):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu'):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
             nn.BatchNorm2d(num_features=out_c),
-            nn.PReLU(num_parameters=1, init=0.2),
         )
+        if act_type.lower() =='prelu':
+            self.conv.append(nn.PReLU(num_parameters=1, init=0.2))
+        else:
+            self.conv.append(nn.ReLU(True))
 
     def forward(self, x):
         x = self.conv(x)
@@ -231,36 +252,36 @@ class ConvBlock(nn.Module):
 
 # ----- Build IFS Block ------
 class IFS(nn.Module):
-    def __init__(self, in_c, out_c, num_groups):
+    def __init__(self, in_c, out_c, num_groups, kernel_size, padding, stride):
         super().__init__()
-        self.compress_in = ConvBlock(in_c=3*in_c, out_c = in_c, kernel_size=1, padding=0, stride=1)
+        self.compress_in = ConvBlock(in_c=3*in_c, out_c = in_c, kernel_size=1, padding=0, stride=1, act_type='prelu')
         self.upBlocks = nn.ModuleList()
         self.downBlocks = nn.ModuleList()
         self.uptranBlocks = nn.ModuleList()
         self.downtranBlocks = nn.ModuleList()
 
-        self.re_guide = ConvBlock(in_c=2*in_c, out_c=in_c, kernel_size=1, padding=0, stride=1)
+        self.re_guide = ConvBlock(in_c=2*in_c, out_c=in_c, kernel_size=1, padding=0, stride=1, act_type='prelu')
 
         self.num_groups = num_groups
         for idx in range(self.num_groups):
             self.upBlocks.append(
-                DeConvBlock(in_c=in_c, out_c=in_c, kernel_size=6, padding=2, stride=2)
+                DeConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='prelu')
             )
 
             self.downBlocks.append(
-                ConvBlock(in_c=in_c, out_c=in_c, kernel_size=6, padding=2, stride=2)
+                ConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='prelu')
             )
 
             if idx > 0: # Add conv 1x1
                 self.uptranBlocks.append(
-                    ConvBlock(in_c=(idx+1)*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0)
+                    ConvBlock(in_c=(idx+1)*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0, act_type='prelu')
                 )
 
                 self.downtranBlocks.append(
-                    ConvBlock(in_c=(idx+1)*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0)
+                    ConvBlock(in_c=(idx+1)*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0, act_type='prelu')
                 )
         
-        self.compress_out = ConvBlock(in_c=num_groups*in_c, out_c=out_c, kernel_size=1, padding=0, stride=1)
+        self.compress_out = ConvBlock(in_c=num_groups*in_c, out_c=out_c, kernel_size=1, padding=0, stride=1, act_type='prelu')
 
     def forward(self, f_in, h_same_way, h_other_way):
         x = torch.concat((f_in, h_same_way, h_other_way), dim=1) # Out = [N, 3*in_c, H, W]
@@ -303,8 +324,8 @@ class ISSM_SAR(nn.Module):
         self.pfe_down = PFE(in_channels=1)
 
         # HFE Modules
-        self.hfe_up = HFE(in_c=36, out_c=36, kernel_size=3)
-        self.hfe_down = HFE(in_c=36, out_c=36, kernel_size=3)
+        self.hfe_up = HFE(in_c=36, out_c=36, kernel_size=6, padding=2, stride = 2, num_blocks=4)
+        self.hfe_down = HFE(in_c=36, out_c=36, kernel_size=6, padding=2, stride=2, num_blocks=4)
 
         # FFB Modules
         self.ffb_up = nn.ModuleList()
@@ -315,8 +336,8 @@ class ISSM_SAR(nn.Module):
         self.rec_down = nn.ModuleList()
 
         for _ in range(self.num_ifs):
-            self.ffb_up.append(IFS(in_c=36, out_c=36, num_groups=3))
-            self.ffb_down.append(IFS(in_c=36, out_c=36, num_groups=3))
+            self.ffb_up.append(IFS(in_c=36, out_c=36, num_groups=3, kernel_size=6, padding=2, stride=2))
+            self.ffb_down.append(IFS(in_c=36, out_c=36, num_groups=3, kernel_size=6, padding=2, stride = 2))
         
         for _ in range(self.num_ifs + 1):
             self.rec_up.append(REC(in_c=36, out_c=1))
