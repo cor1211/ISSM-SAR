@@ -157,7 +157,28 @@ class DeFormBlock(nn.Module):
         x = self.bn(x)
         x = self.act(x)
         return x
-                
+              
+class DeFormBlockv2(nn.Module):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type):
+        super().__init__()
+        self.deform = DeformConv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding)
+        self.offset_mask_conv = nn.Conv2d(in_channels=in_c, out_channels=3*kernel_size*kernel_size, padding=padding, stride=stride, kernel_size=kernel_size)
+        self.bn = nn.BatchNorm2d(num_features=out_c)
+        if act_type.lower() =='prelu':
+            self.act = nn.PReLU(num_parameters=1, init=0.2)
+        else:
+            self.act = nn.ReLU(True)
+        
+    def forward(self, x):
+        out = self.offset_mask_conv(x)
+        o1, o2, mask = torch.chunk(out, 3, dim=1) # Split offset and mask
+        offset = torch.concat((o1, o2), dim=1) # Offset
+        mask = torch.sigmoid(mask)
+        x = self.deform(x, offset, mask)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+      
 class HFE(nn.Module): # Fix out_c = in_c
     def __init__(self, in_c, out_c, kernel_size, padding, stride, num_blocks):
         super().__init__()
@@ -166,26 +187,17 @@ class HFE(nn.Module): # Fix out_c = in_c
         for _ in range(num_blocks):
             self.blocks.append(nn.Sequential(
                 DeConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='relu'),
-                DeFormBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride = stride, act_type='relu')
+                DeFormBlockv2(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride = stride, act_type='relu')
             ))
 
         self.down_channel_blocks = nn.ModuleList()
         for _ in range(num_blocks-2):
             self.down_channel_blocks.append(ConvBlock(in_c=2*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0, act_type='relu'))
 
-        self.last_deform = DeFormBlock(in_c=2*in_c, out_c=out_c, kernel_size=3, padding=1, stride=1, act_type='relu') # Not change H, W
+        self.last_deform = DeFormBlockv2(in_c=2*in_c, out_c=out_c, kernel_size=3, padding=1, stride=1, act_type='relu') # Not change H, W
 
     def forward(self, x):
         in_module = x # In = [N, 336, H, W]
-        
-        # x = self.in_block(x) # Out = [N, 336, H, W]
-        # in_previous_block = torch.zeros_like(x) # [N, 336, H, W]
-        # 
-        # for block in self.blocks:
-            # in_cur_block = x + in_previous_block
-            # x = block(in_cur_block) # Out = [N, 336, H, W]
-            # in_previous_block = in_cur_block
-        
         outs = []
         for idx in range(self.num_blocks):
             just_out = self.blocks[idx](x)
@@ -232,6 +244,7 @@ class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow sc
         x = self.deconv(x)
         return x
 
+
 class ConvBlock(nn.Module):
     def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu'):
         super().__init__()
@@ -270,6 +283,7 @@ class IFS(nn.Module):
 
             self.downBlocks.append(
                 ConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='prelu')
+                # DeFormBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride= stride, act_type='prelu')
             )
 
             if idx > 0: # Add conv 1x1
