@@ -11,24 +11,24 @@ from torchinfo import summary
 
 # Khoi 3 CNN
 class MultiLooks(nn.Module):
-    def __init__(self, in_channel:int = 1):
+    def __init__(self, in_channel, out_channel):
         super().__init__()
         self.three_cnn = nn.ModuleList()
         self.three_cnn.extend(
             [
                 nn.Sequential(
-                    nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=3, padding=3//2, stride=1),
-                    nn.BatchNorm2d(num_features=4),
+                    nn.Conv2d(in_channels=in_channel, out_channels=int(out_channel//3), kernel_size=3, padding=3//2, stride=1),
+                    nn.BatchNorm2d(num_features=int(out_channel//3)),
                     nn.ReLU(True),
                     ),
                 nn.Sequential(
-                    nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=5, padding=5//2, stride=1),
-                    nn.BatchNorm2d(num_features=4),
+                    nn.Conv2d(in_channels=in_channel, out_channels=int(out_channel//3), kernel_size=5, padding=5//2, stride=1),
+                    nn.BatchNorm2d(num_features=int(out_channel//3)),
                     nn.ReLU(True),
                     ),
                 nn.Sequential(
-                    nn.Conv2d(in_channels=in_channel, out_channels=4, kernel_size=7, padding=7//2, stride=1),
-                    nn.BatchNorm2d(num_features=4),
+                    nn.Conv2d(in_channels=in_channel, out_channels=int(out_channel//3), kernel_size=7, padding=7//2, stride=1),
+                    nn.BatchNorm2d(num_features=int(out_channel//3)),
                     nn.ReLU(True),
                     ),
             ]
@@ -79,21 +79,22 @@ class ECA(nn.Module):
 class PFE(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
-        self.first_way = MultiLooks(in_channel=in_channels) # Out = [N, 112, H, W]
+        self.first_way = MultiLooks(in_channel=in_channels, out_channel=12) # Out = [N, 112, H, W]
 
         self.second_way = nn.Sequential(
             nn.Upsample(scale_factor=0.5, mode='bilinear', align_corners=False), # Out = [H//2, W//2]
-            MultiLooks(in_channel=in_channels), # Out = [N, 112, H//2, W//2]
+            MultiLooks(in_channel=in_channels,out_channel=12), # Out = [N, 112, H//2, W//2]
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False), # Out = [H, W]
 
         )   
         self.third_way = nn.Sequential(
             HighFrequencyExtractor(), # Origin dimens
-            MultiLooks(in_channel=in_channels) # Out = [N, 112, H, W]  
+            MultiLooks(in_channel=in_channels,out_channel=12) # Out = [N, 112, H, W]  
         )
 
-        self.pfe = nn.Sequential(self.first_way, self.second_way, self.third_way)
-        
+        self.pfe = nn.ModuleList()
+        self.pfe.extend([self.first_way, self.second_way, self.third_way])
+
         self.eca = ECA(36)
     def forward(self, x):
         outs_way = []
@@ -102,6 +103,7 @@ class PFE(nn.Module):
             outs_way.append(way(x))
 
         after_relu =  nn.ReLU(True)(torch.concat(outs_way, dim=1))
+
         return self.eca(after_relu)
 
 # Deconv2d Block
@@ -283,7 +285,7 @@ class IFS(nn.Module):
 
             self.downBlocks.append(
                 ConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='prelu')
-                # DeFormBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride= stride, act_type='prelu')
+                # DeFormBlockv2(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride= stride, act_type='prelu')
             )
 
             if idx > 0: # Add conv 1x1
