@@ -1,0 +1,39 @@
+# Dataset config
+data:
+  root: '/mnt/data1tb/vinh/ISSM-SAR/dataset'
+  train_batch_size: 4
+  test_batch_size: 4
+  num_workers: 2
+
+# Training config
+train:
+  epochs: 15
+  lr: 0.000001
+
+
+# Model architecture config
+model:
+  num_ifs: 3
+
+  pfe:
+    in_channels: 1
+  
+  hfe:
+    in_c: 36
+    out_c: 36
+    kernel_size: 6
+    padding: 2
+    stride: 2
+    num_blocks: 4
+  
+  rec:
+    in_c: 36
+    out_c: 1
+
+  ifs:
+    in_c: 36
+    out_c: 36
+    num_groups: 3
+    kernel_size: 6
+    padding: 2
+    stride: 2
