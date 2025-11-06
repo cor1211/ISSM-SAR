@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Data
+dataset/
+dataset.zip
+
+# Runs / Logs
+runs/
+
+# Môi trường (Tùy chọn, nhưng nên thêm)
+environment.yml
+no_prefix_environment.yml
+conda_syntax
