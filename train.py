@@ -94,7 +94,7 @@ if __name__ =='__main__':
     log_dir = f"runs/exp_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     writer = SummaryWriter(log_dir)
 
-    checkpoint_dir = os.path.join(checkpoint, log_dir.split('/')[-1])
+    checkpoint_dir = os.path.join('checkpoints', log_dir.split('/')[-1])
     total_epochs = train_cfg['epochs']
 
     for epoch in range(start_epoch, start_epoch+total_epochs):
