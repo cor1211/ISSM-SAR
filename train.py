@@ -86,15 +86,22 @@ if __name__ =='__main__':
             optimizer.load_state_dict(checkpoint['optimizer_state_dict']) # Load optimizer
             start_epoch = checkpoint['epoch'] + 1
             best_psnr = checkpoint['best_psnr']
-            print(f'Resuming run from epoch {start_epoch}. Best PSNR: {best_psnr}')
+            run_name = args.checkpoint_path.split('/')[-2]
+            print(f"Resuming run '{run_name}' from epoch {start_epoch}. Best PSNR: {best_psnr:.3f}")
     else:
-        print('Training from beginning')
+        run_name = f"exp_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        print(f"Starting new run: {run_name}")
 
+    log_dir = os.path.join('runs', run_name)
+    checkpoint_dir = os.path.join('checkpoints', run_name)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
     # Init writer log
-    log_dir = f"runs/exp_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     writer = SummaryWriter(log_dir)
-
-    checkpoint_dir = os.path.join('checkpoints', log_dir.split('/')[-1])
+    print(f"TensorBoard logs will be saved to: {log_dir}")
+    print(f"Checkpoints will be saved to: {checkpoint_dir}")
+    
     total_epochs = train_cfg['epochs']
 
     for epoch in range(start_epoch, start_epoch+total_epochs):
@@ -153,16 +160,17 @@ if __name__ =='__main__':
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'best_psnr': best_psnr
+            'best_psnr': best_psnr,
+            'config': config
         }
         
         # Save last checkpoint
-        last_checkpoint_path = os.path.join(checkpoint_dir, '_last.pth')
+        last_checkpoint_path = os.path.join(checkpoint_dir, 'last.pth')
         torch.save(checkpoint_data, last_checkpoint_path)
 
         # Save best checkpoint if get best_psnr
         if is_best_pnsr:
-            best_checkpoint_path = os.path.join(checkpoint_data, '_best.pth')
+            best_checkpoint_path = os.path.join(checkpoint_data, 'best.pth')
             torch.save(checkpoint_data, best_checkpoint_path)
 
         print(f'Epoch {epoch}: last checkpoint saved')
