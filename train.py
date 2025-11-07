@@ -73,6 +73,7 @@ if __name__ =='__main__':
     model = ISSM_SAR(model_cfg).to(device)
     optimizer = Adam(model.parameters(), lr=train_cfg['lr'])
     start_epoch = 1
+    best_psnr = 0.0
 
     # Load checkpoint
     if args.checkpoint_path:
@@ -87,10 +88,10 @@ if __name__ =='__main__':
             start_epoch = checkpoint['epoch'] + 1
             best_psnr = checkpoint['best_psnr']
             run_name = args.checkpoint_path.split('/')[-2]
-            print(f"Resuming run '{run_name}' from epoch {start_epoch}. Best PSNR: {best_psnr:.3f}")
+            print(f"------------------\nResuming run '{run_name}' from epoch {start_epoch}. Best PSNR: {best_psnr:.3f}")
     else:
         run_name = f"exp_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        print(f"Starting new run: {run_name}")
+        print(f"--------------------\nStarting new run: {run_name}")
 
     log_dir = os.path.join('runs', run_name)
     checkpoint_dir = os.path.join('checkpoints', run_name)
@@ -102,9 +103,11 @@ if __name__ =='__main__':
     print(f"TensorBoard logs will be saved to: {log_dir}")
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
     
+    # Start, end epoch
     total_epochs = train_cfg['epochs']
+    end_epoch = start_epoch + total_epochs
 
-    for epoch in range(start_epoch, start_epoch+total_epochs):
+    for epoch in range(start_epoch, end_epoch):
         torch.cuda.empty_cache()
         model.train()
         loss_show = 0.0
@@ -125,9 +128,9 @@ if __name__ =='__main__':
             optimizer.zero_grad() # Zero gradients
             loss.backward() # Compute gradients
             optimizer.step() # Update weights
-            tqdm_train_loader.set_description(f'Epoch [{epoch}/{train_cfg["epochs"]}], Iter [{iter+1}/{num_iter_train}], Loss: {loss.item():.5f}')
+            tqdm_train_loader.set_description(f'Epoch [{epoch}/{end_epoch-1}], Iter [{iter+1}/{num_iter_train}], Loss: {loss.item():.5f}')
         
-        print(f"Epoch [{epoch}/{train_cfg['epochs']}], Loss_avg: {(loss_show/num_iter_train):.5f}") # Print average loss of epoch
+        print(f"Epoch [{epoch}/{end_epoch-1}], Loss_avg: {(loss_show/num_iter_train):.5f}") # Print average loss of epoch
         
         # Valid
         model.eval()
@@ -148,7 +151,7 @@ if __name__ =='__main__':
                 ssim_iter= ssim_torch(sr_fusion, hr).item()
                 psnr_all += psnr_iter
                 ssim_all += ssim_iter
-            print(f'Epoch [{epoch}/{train_cfg["epochs"]}]\nPSNR: {psnr_all/num_iter_test:.3f} dB\n SSIM: {ssim_all/num_iter_test:.3f}')
+            print(f'Epoch [{epoch}/{end_epoch-1}]\nPSNR: {psnr_all/num_iter_test:.3f} dB\nSSIM: {ssim_all/num_iter_test:.3f}')
         
         is_best_pnsr = psnr_all/num_iter_test > best_psnr
         
@@ -167,13 +170,14 @@ if __name__ =='__main__':
         # Save last checkpoint
         last_checkpoint_path = os.path.join(checkpoint_dir, 'last.pth')
         torch.save(checkpoint_data, last_checkpoint_path)
+        print(f'Epoch {epoch}: last checkpoint saved')
 
         # Save best checkpoint if get best_psnr
         if is_best_pnsr:
-            best_checkpoint_path = os.path.join(checkpoint_data, 'best.pth')
+            best_checkpoint_path = os.path.join(checkpoint_dir, 'best.pth')
             torch.save(checkpoint_data, best_checkpoint_path)
+        print(f'Epoch {epoch}: best checkpoint saved')
 
-        print(f'Epoch {epoch}: last checkpoint saved')
         # logging
         writer.add_scalar(tag='Loss/train', scalar_value=loss_show/num_iter_train, global_step=epoch)
         writer.add_scalar(tag='Metrics/PSNR', scalar_value=psnr_all/num_iter_test, global_step=epoch)
