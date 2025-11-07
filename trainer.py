@@ -39,9 +39,6 @@ class Trainer():
 
 
     def _load_checkpoint(self, resume_path):
-        if not os.path.exists(resume_path):
-            print('Checkpoint path not found. End!')
-            exit()
         try:
             # Load checkpoint
             checkpoint = torch.load(resume_path)

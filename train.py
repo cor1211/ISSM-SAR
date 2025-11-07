@@ -39,6 +39,9 @@ if __name__ =='__main__':
 
     # run_name
     if args.checkpoint_path:
+        if not os.path.exists(args.checkpoint_path):
+            print('Checkpoint path not found. End!')
+            exit()
         try:
             run_name = args.checkpoint_path.split('/')[-2]
         except Exception as e:
