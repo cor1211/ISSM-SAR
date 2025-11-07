@@ -176,7 +176,7 @@ if __name__ =='__main__':
         if is_best_pnsr:
             best_checkpoint_path = os.path.join(checkpoint_dir, 'best.pth')
             torch.save(checkpoint_data, best_checkpoint_path)
-        print(f'Epoch {epoch}: best checkpoint saved')
+            print(f'Epoch {epoch}: best checkpoint saved')
 
         # logging
         writer.add_scalar(tag='Loss/train', scalar_value=loss_show/num_iter_train, global_step=epoch)
