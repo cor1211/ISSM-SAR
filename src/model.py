@@ -84,6 +84,7 @@ class PFE(nn.Module):
         self.pfe = nn.ModuleList()
         self.pfe.extend([self.first_way, self.second_way, self.third_way])
 
+        self.compress_out = ConvBlock(in_c=out_channels, out_c=out_channels, kernel_size=3, padding=1, stride=1, act_type='relu')
         self.eca = ECA(out_channels)
 
     def forward(self, x):
@@ -92,9 +93,9 @@ class PFE(nn.Module):
             # print(idx, way)
             outs_way.append(way(x))
 
-        after_relu =  nn.ReLU(True)(torch.concat(outs_way, dim=1))
+        # after_relu =  nn.ReLU(True)(torch.concat(outs_way, dim=1))
 
-        return self.eca(after_relu)
+        return self.eca(self.compress_out(torch.concat(outs_way, dim=1)))
 
      
 
