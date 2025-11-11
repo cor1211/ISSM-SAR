@@ -8,6 +8,14 @@ from PIL import Image
 from torchvision.transforms import Resize,ToTensor, InterpolationMode
 from torchvision.ops import DeformConv2d
 from torchinfo import summary
+import yaml
+import argparse
+
+def load_config(config_path: str):
+    with open(config_path, 'r') as file:
+        config = yaml.safe_load(file)
+    return config
+
 
 # Khoi 3 CNN
 class MultiLooks(nn.Module):
@@ -31,7 +39,7 @@ class MultiLooks(nn.Module):
 
 # Khoi tach biet tan so cao/thap
 class HighFrequencyExtractor(nn.Module):
-    def __init__(self, wavelet = 'haar', mode = 'zero'):
+    def __init__(self, wavelet = 'haar', mode = 'reflect'):
         super().__init__()
         self.dwt = DWTForward(J = 1, wave= wavelet, mode= mode)
         self.idwt = DWTInverse(wave=wavelet, mode = mode)
@@ -359,6 +367,17 @@ class ISSM_SAR(nn.Module):
         
          
 if __name__ == '__main__':
+    # Argument parser
+    parser = argparse.ArgumentParser(description='Train ISSM-SAR Model')
+    parser.add_argument('--config_path', type=str, default= '/mnt/data1tb/vinh/ISSM-SAR/config/base_config.yaml', help='Path to the YAML config file')
+    parser.add_argument('--checkpoint_path', type = str, default=None, help='Path to checkpoint to resume training')
+    args = parser.parse_args()
+
+    # Load config
+    config = load_config(args.config_path)
+    model_cfg = config['model']
+
+
     if torch.cuda.is_available():
         device = torch.device('cuda')
         print(f'Using GPU {torch.cuda.get_device_name(device)}')
@@ -366,7 +385,8 @@ if __name__ == '__main__':
         device = torch.device('cpu')
         print(f'No GPU. Using CPU instead')
 
-    issm_sar = ISSM_SAR(in_channel=1, out_channel=1, num_ifs=3).to(device)
+    
+    issm_sar = ISSM_SAR(config=model_cfg).to(device)
     input_first_time = torch.rand(4, 1, 128,128).to(device)
     input_second_time = torch.rand(4, 1, 128,128).to(device)
 
