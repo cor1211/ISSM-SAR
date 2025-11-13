@@ -21,6 +21,7 @@ if __name__ =='__main__':
     parser = argparse.ArgumentParser(description='Train ISSM-SAR Model')
     parser.add_argument('--config_path', type=str, default= '/mnt/data1tb/vinh/ISSM-SAR/config/base_config.yaml', help='Path to the YAML config file')
     parser.add_argument('--checkpoint_path', type = str, default=None, help='Path to checkpoint to resume training')
+    parser.add_argument('--kaggle', type=int, default=0)
     args = parser.parse_args()
 
     # Load config
@@ -49,7 +50,7 @@ if __name__ =='__main__':
             exit()
     else:
         run_name = f'exp_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
-    
+
     # Init SummaryWriter to log
     log_dir = os.path.join('runs', run_name)
     writer = SummaryWriter(log_dir)
@@ -90,7 +91,7 @@ if __name__ =='__main__':
     optimizer = Adam(model.parameters(), lr=train_cfg['lr'])
 
     # Training
-    trainer = Trainer(model, optimizer, train_loader, valid_loader, device, config, writer, run_name, args.checkpoint_path)
+    trainer = Trainer(model, optimizer, train_loader, valid_loader, device, config, writer, run_name, args.checkpoint_path, args.kaggle)
     trainer.run()
 
 
