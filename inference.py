@@ -18,6 +18,7 @@ def load_config(config_path: str) -> dict:
         print('Invalid yaml config file')
         exit()
 
+
 def load_image_tensor(image_path: str, transform: Compose) -> torch.Tensor:
     try:
         image = Image.open(image_path).convert('L')
@@ -28,6 +29,7 @@ def load_image_tensor(image_path: str, transform: Compose) -> torch.Tensor:
     # transform
     transformed_img = transform(image) # [C, H, W]
     return transformed_img.unsqueeze(0) # [1, C, H, W]
+
 
 def load_device():
     if torch.cuda.is_available():
@@ -79,7 +81,7 @@ if __name__ == '__main__':
     transform = Compose(
         transforms=[
             ToTensor(),
-            Normalize(mean=0.5, std=0.5)
+            Normalize(mean=[0.5], std=[0.5])
         ]
     )
 
@@ -87,7 +89,7 @@ if __name__ == '__main__':
     img_path_1 = args.image_path_1
     img_path_2 = img_path_1.replace('time_1', 'time_2')
     transformed_img_1 = load_image_tensor(img_path_1, transform).to(device)
-    transformed_img_2 = load_image_tensor(img_path_1, transform).to(device)
+    transformed_img_2 = load_image_tensor(img_path_2, transform).to(device)
 
     # Init model
     model = ISSM_SAR(config=model_cfg).to(device)
@@ -95,17 +97,17 @@ if __name__ == '__main__':
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
-    # Infer SR
+    # -------------- Infer SR ------------------
     with torch.no_grad():
         sr_up, sr_down = model(transformed_img_1, transformed_img_2)
     
-    # Transforming sr to [0, 255]
+    # ---------------- Transforming sr to [0, 255] -------------------
     sr_fusion = 0.5 * sr_up[-1] + 0.5 * sr_down[-1]
     sr_fusion = sr_fusion.squeeze(0).squeeze(0)  # Remove batch and channel dims -> (H, W)
     sr_fusion = (sr_fusion * 0.5 + 0.5).clamp(0, 1)
     output_image = (sr_fusion.cpu() * 255).clamp(0, 255).byte().numpy()  # Convert to uint8
     output_image = Image.fromarray(output_image)
     output_image.show()
-    # print(sr_fusion.shape)
+
 
     
