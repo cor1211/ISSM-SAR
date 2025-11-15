@@ -5,7 +5,7 @@ from tqdm import tqdm
 from src import l1_loss, lratio_loss, psnr_torch, ssim_torch
 
 class Trainer():
-    def __init__(self, model, optimizer, train_loader, valid_loader, device, config, writer, run_name, resume_path = None):
+    def __init__(self, model, optimizer, train_loader, valid_loader, device, config, writer, run_name, resume_path = None, kaggle = None):
         # Model
         self.model = model
         self.optimizer = optimizer
@@ -27,8 +27,10 @@ class Trainer():
         self.resume_path =resume_path
         self.run_name = run_name
         self.checkpoint_dir = os.path.join('checkpoints', self.run_name)
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        if kaggle:
+            self.checkpoint_dir = '/kaggle/working/' + self.checkpoint_dir
 
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.start_epoch = 1
         self.best_psnr = 0.0
         self.total_epochs = self.train_cfg['epochs']
@@ -51,6 +53,7 @@ class Trainer():
         except Exception as e:
             print(f'Error loading checkpoint {e}. Double check resume path')
             exit()
+    
     
     def _save_checkpoint(self, epoch:int, is_best: bool):
         checkpoint_data = {
