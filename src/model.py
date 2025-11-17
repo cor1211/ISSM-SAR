@@ -104,7 +104,7 @@ class PFE(nn.Module):
         # after_relu =  nn.ReLU(True)(torch.concat(outs_way, dim=1))
 
         return self.eca(self.compress_out(torch.concat(outs_way, dim=1)))
-
+        # return self.eca(after_relu)
      
 
 class DeFormBlock(nn.Module):
@@ -156,6 +156,7 @@ class HFE(nn.Module): # Fix out_c = in_c
         for _ in range(num_blocks):
             self.blocks.append(nn.Sequential(
                 DeConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='relu'),
+                # DeFormBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride = stride, act_type='relu'),
                 DeFormBlockv2(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride = stride, act_type='relu')
             ))
 
@@ -164,6 +165,7 @@ class HFE(nn.Module): # Fix out_c = in_c
             self.down_channel_blocks.append(ConvBlock(in_c=2*in_c, out_c=in_c, kernel_size=1, stride=1, padding=0, act_type='relu'))
 
         self.last_deform = DeFormBlockv2(in_c=2*in_c, out_c=out_c, kernel_size=3, padding=1, stride=1, act_type='relu') # Not change H, W
+        # self.last_deform = DeFormBlock(in_c=2*in_c, out_c=out_c, kernel_size=3, padding=1, stride=1, act_type='relu') # Not change H, W
 
     def forward(self, x):
         in_module = x # In = [N, 336, H, W]
@@ -249,6 +251,7 @@ class IFS(nn.Module):
             self.downBlocks.append(
                 ConvBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride=stride, act_type='prelu')
                 # DeFormBlockv2(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride= stride, act_type='prelu')
+                # DeFormBlock(in_c=in_c, out_c=in_c, kernel_size=kernel_size, padding=padding, stride= stride, act_type='prelu')
             )
 
             if idx > 0: # Add conv 1x1
@@ -339,7 +342,7 @@ class ISSM_SAR(nn.Module):
 
         # Pass throught HFE
         h1 = self.hfe_up(f1)
-        h2 = self.hfe_up(f2)
+        h2 = self.hfe_down(f2)
 
         # Pass throught FFB (each IFSs)
         in_ifs_up = []
@@ -359,8 +362,9 @@ class ISSM_SAR(nn.Module):
         sr_up = []
         sr_down = []
         for idx in range(self.num_ifs+1):
-            sr_up.append(self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled)
-            sr_down.append(self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled)
+            sr_up.append(torch.clamp((self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled), -1.0, 1.0))# Out (-1, 1)
+            sr_down.append(torch.clamp((self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled), -1.0, 1.0))
+
         
         return sr_up, sr_down
 
@@ -387,14 +391,13 @@ if __name__ == '__main__':
 
     
     issm_sar = ISSM_SAR(config=model_cfg).to(device)
-    input_first_time = torch.rand(4, 1, 128,128).to(device)
-    input_second_time = torch.rand(4, 1, 128,128).to(device)
+    input_first_time = torch.rand(1, 1, 128,128).to(device)
+    input_second_time = torch.rand(1, 1, 128,128).to(device)
 
     sr_up, sr_down = issm_sar(input_first_time, input_second_time)
     
     for idx in range(4):
         print(sr_up[idx].shape, sr_down[idx].shape)
     
-    summary(issm_sar, input_size=[(4,1, 128,128),(4,1,128,128)])
-    
+    summary(issm_sar, input_size=[(1,1, 128,128),(1,1,128,128)])
     
