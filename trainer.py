@@ -82,26 +82,51 @@ class Trainer():
         loss_show = 0.0
         tqdm_train_loader = tqdm(self.train_loader, desc=f'Epoch [{epoch}/{self.end_epoch-1}] Train')
 
+        theta_1 = 5.0  # Trọng số cho L_ratio (khử nhiễu)
+        theta_2 = 0.5
+        # Hàm để denormalize từ [-1, 1] về [0, 1] cho việc tính Loss
+        def denorm(x):
+            return (x * 0.5 + 0.5).clamp(0, 1)
+        
         for iter, ((lr1, lr2), hr) in enumerate(tqdm_train_loader):
             lr1, lr2 = lr1.to(self.device), lr2.to(self.device)
             hr = hr.to(self.device)
+            hr= denorm(hr)
             # forward pass
             sr_up, sr_down = self.model(lr1, lr2)
             
+            total_ratio_loss = 0.0
+            total_l1_loss = 0.0
+            
             # compute loss
-            l1_total = (lratio_loss(sr_up[-1], hr) + lratio_loss(sr_down[-1], hr)) + (l1_loss(sr_up[-1], hr) + l1_loss(sr_down[-1], hr))
-            l2_total = 0
+            # l1_total = (lratio_loss(sr_up[-1], hr) + lratio_loss(sr_down[-1], hr)) + (l1_loss(sr_up[-1], hr) + l1_loss(sr_down[-1], hr))
+            # l2_total = 0
+            # for idx in range(self.model_cfg['num_ifs']):
+            #     l2_total += (lratio_loss(sr_up[idx], hr) + lratio_loss(sr_down[idx], hr)) + (l1_loss(sr_up[idx], hr) + l1_loss(sr_down[idx], hr))
+            # loss = l1_total + l2_total
+
             for idx in range(self.model_cfg['num_ifs']):
-                l2_total += (lratio_loss(sr_up[idx], hr) + lratio_loss(sr_down[idx], hr)) + (l1_loss(sr_up[idx], hr) + l1_loss(sr_down[idx], hr))
-            loss = l1_total + l2_total
+                total_ratio_loss += lratio_loss(denorm(sr_up[idx]), hr) + lratio_loss(denorm(sr_down[idx]), hr)
+                total_l1_loss += l1_loss(denorm(sr_up[idx]), hr) + l1_loss(denorm(sr_down[idx]), hr)
+
+            # 2. Tính loss cho đầu ra cuối cùng (tương ứng L_total^1)
+            total_ratio_loss += lratio_loss(denorm(sr_up[-1]), hr) + lratio_loss(denorm(sr_down[-1]), hr)
+            total_l1_loss += l1_loss(denorm(sr_up[-1]), hr) + l1_loss(denorm(sr_down[-1]), hr)
+            
+            # 3. Tính loss tổng cuối cùng (theo Phương trình 27)
+            loss = (theta_1 * total_ratio_loss) + (theta_2 * total_l1_loss)
+
             loss_show += loss.item()
+            # Thêm 2 dòng này để debug
+            if iter % 100 == 0:
+                print(f"\nRatio Loss: {total_ratio_loss.item():.4f}, L1 Loss: {total_l1_loss.item():.4f}")
             # backward pass
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             # Update tqdm
             tqdm_train_loader.set_postfix(Loss=f'{loss.item():.5f}')
-        
+
         avg_loss = loss_show/self.num_iter_train
         print(f"Epoch [{epoch}/{self.end_epoch-1}], Average Train Loss: {avg_loss:.5f}")
         return avg_loss
