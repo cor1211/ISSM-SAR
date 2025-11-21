@@ -24,17 +24,18 @@ class MultiLooks(nn.Module):
         self.three_cnn = nn.ModuleList()
         self.three_cnn.extend(
             [       
-                ConvBlock(in_c=in_channel, out_c= out_channel//3, kernel_size=3, padding=3//2, stride=1, act_type='relu'),
-                ConvBlock(in_c=in_channel, out_c= out_channel//3, kernel_size=5, padding=5//2, stride=1, act_type='relu'),
-                ConvBlock(in_c=in_channel, out_c= out_channel//3, kernel_size=7, padding=7//2, stride=1, act_type='relu'),
+                ConvBlock(in_c=in_channel, out_c= out_channel, kernel_size=3, padding=3//2, stride=1, act_type='relu'),
+                ConvBlock(in_c=in_channel, out_c= out_channel, kernel_size=5, padding=5//2, stride=1, act_type='relu'),
+                ConvBlock(in_c=in_channel, out_c= out_channel, kernel_size=7, padding=7//2, stride=1, act_type='relu'),
             ]
         )
-
+        self.conpress_out = ConvBlock(in_c=3 * out_channel, out_c=out_channel, kernel_size=1, padding=0, stride=1, act_type='relu')
+    
     def forward(self, x):
         out_cnns = []
         for layer in self.three_cnn:
             out_cnns.append(layer(x))
-        return torch.concat(out_cnns, dim=1)
+        return self.conpress_out(torch.concat(out_cnns, dim=1))
 
 
 # Khoi tach biet tan so cao/thap
@@ -76,23 +77,23 @@ class ECA(nn.Module):
 class PFE(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.first_way = MultiLooks(in_channel=in_channels, out_channel=int(out_channels//3)) # Out = [N, 112, H, W]
+        self.first_way = MultiLooks(in_channel=in_channels, out_channel=out_channels) # Out = [N, 112, H, W]
 
         self.second_way = nn.Sequential(
             nn.Upsample(scale_factor=0.5, mode='bilinear', align_corners=False), # Out = [H//2, W//2]
-            MultiLooks(in_channel=in_channels,out_channel=int(out_channels//3)), # Out = [N, 112, H//2, W//2]
+            MultiLooks(in_channel=in_channels,out_channel=out_channels), # Out = [N, 112, H//2, W//2]
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False), # Out = [H, W]
 
         )   
         self.third_way = nn.Sequential(
             HighFrequencyExtractor(), # Origin dimens
-            MultiLooks(in_channel=in_channels,out_channel=int(out_channels//3)) # Out = [N, 112, H, W]  
+            MultiLooks(in_channel=in_channels,out_channel=out_channels) # Out = [N, 112, H, W]  
         )
 
         self.pfe = nn.ModuleList()
         self.pfe.extend([self.first_way, self.second_way, self.third_way])
 
-        self.compress_out = ConvBlock(in_c=out_channels, out_c=out_channels, kernel_size=3, padding=1, stride=1, act_type='relu')
+        self.compress_out = ConvBlock(in_c = 3 * out_channels, out_c=out_channels, kernel_size=1, padding = 0, stride=1, act_type='relu')
         self.eca = ECA(out_channels)
 
     def forward(self, x):
@@ -197,12 +198,13 @@ class REC(nn.Module): # In = [N, out_HFE, H, W] | Out = [N, 1, 2H, 2W]
 
 #--------- IFS's Blocks ----------
 class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow scale_factor x2
-    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu'):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu', use_bn:bool = True):
         super().__init__()
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(num_features=out_c),
+            nn.ConvTranspose2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding)
         )
+        if use_bn:
+            self.deconv.append(nn.BatchNorm2d(num_features=out_c))
         if act_type.lower() =='prelu':
             self.deconv.append(nn.PReLU(num_parameters=1, init=0.2))
         elif act_type.lower() == 'relu':
@@ -214,12 +216,13 @@ class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow sc
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu'):
+    def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu', use_bn:bool = True):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding),
-            nn.BatchNorm2d(num_features=out_c),
+            nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding)
         )
+        if use_bn:
+            self.conv.append(nn.BatchNorm2d(num_features=out_c))
         if act_type.lower() =='prelu':
             self.conv.append(nn.PReLU(num_parameters=1, init=0.2))
         elif act_type.lower() == 'relu':
@@ -362,7 +365,7 @@ class ISSM_SAR(nn.Module):
         sr_up = []
         sr_down = []
         for idx in range(self.num_ifs+1):
-            sr_up.append(torch.clamp((self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled), -1.0, 1.0))# Out (-1, 1)
+            sr_up.append(torch.clamp((self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled), -1.0, 1.0))# Out (-255, 255)
             sr_down.append(torch.clamp((self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled), -1.0, 1.0))
 
         
@@ -399,5 +402,5 @@ if __name__ == '__main__':
     for idx in range(4):
         print(sr_up[idx].shape, sr_down[idx].shape)
     
-    summary(issm_sar, input_size=[(1,1, 128,128),(1,1,128,128)])
+    summary(issm_sar, input_size=[(4,1, 128,128),(4,1,128,128)])
     
