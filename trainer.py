@@ -21,6 +21,7 @@ class Trainer():
         self.config = config
         self.train_cfg = self.config['train']
         self.model_cfg = self.config['model']
+        self.val_step = self.train_cfg['val_step']
 
         # log, checkpoint
         self.writer = writer
@@ -89,6 +90,7 @@ class Trainer():
             return (x * 0.5 + 0.5).clamp(0, 1)
         
         for iter, ((lr1, lr2), hr) in enumerate(tqdm_train_loader):
+            current_global_step = (epoch - 1) * self.num_iter_train + iter
             lr1, lr2 = lr1.to(self.device), lr2.to(self.device)
             hr = hr.to(self.device)
             hr= denorm(hr)
@@ -119,17 +121,39 @@ class Trainer():
             loss_show += loss.item()
             # Thêm 2 dòng này để debug
             if iter % 100 == 0:
-                print(f"\nRatio Loss: {total_ratio_loss.item():.4f}, L1 Loss: {total_l1_loss.item():.4f}")
+                print(f"\nRatio Loss: {theta_1 * total_ratio_loss.item():.4f}, L1 Loss: {theta_2 * total_l1_loss.item():.4f}")
             # backward pass
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             # Update tqdm
             tqdm_train_loader.set_postfix(Loss=f'{loss.item():.5f}')
+            
 
-        avg_loss = loss_show/self.num_iter_train
-        print(f"Epoch [{epoch}/{self.end_epoch-1}], Average Train Loss: {avg_loss:.5f}")
-        return avg_loss
+            # Validation by step
+            if (current_global_step + 1) % self.val_step == 0:
+                # Log loss each step
+                avg_loss = loss_show/self.num_iter_train
+                print(f"Step [{current_global_step+1}], Average Train Loss: {avg_loss:.5f}")
+                self.writer.add_scalar(tag='Loss/Train_Step', scalar_value=avg_loss, global_step=current_global_step)
+
+                print(f"\n[Step {current_global_step + 1}] Start Validating...")
+                # Validate
+                avg_psnr, avg_ssim = self._validate_epoch(epoch)
+                # Log Metrics by Step
+                self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=current_global_step)
+                self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=current_global_step)
+
+                # Check best & Save Checkpoint
+                is_best = avg_psnr > self.best_psnr
+                if is_best:
+                    self.best_psnr = avg_psnr
+                    print(f"New Best PSNR: {self.best_psnr:.3f}")
+                
+                self._save_checkpoint(epoch, is_best)
+                self.model.train()
+
+       
 
 
     def _validate_epoch(self, epoch: int):
@@ -180,21 +204,21 @@ class Trainer():
             torch.cuda.empty_cache()
             
             # training
-            avg_loss = self._train_epoch(epoch)
+            self._train_epoch(epoch)
             
-            # validate
-            avg_psnr, avg_ssim = self._validate_epoch(epoch)
+            # # validate
+            # avg_psnr, avg_ssim = self._validate_epoch(epoch)
             
-            # logging
-            self.writer.add_scalar(tag='Loss/Train', scalar_value=avg_loss, global_step=epoch)
-            self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=epoch)
-            self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=epoch)
+            # # logging
+            # self.writer.add_scalar(tag='Loss/Train', scalar_value=avg_loss, global_step=epoch)
+            # self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=epoch)
+            # self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=epoch)
 
-            # Save checkpoint
-            is_best = avg_psnr > self.best_psnr
-            if is_best:
-                self.best_psnr = avg_psnr
-            self._save_checkpoint(epoch, is_best)
+            # # Save checkpoint
+            # is_best = avg_psnr > self.best_psnr
+            # if is_best:
+            #     self.best_psnr = avg_psnr
+            # self._save_checkpoint(epoch, is_best)
         
         self.writer.close()
         print("Training finished.")
