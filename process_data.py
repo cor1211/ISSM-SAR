@@ -23,7 +23,11 @@ def pil_rgb_to_bt709(img_pil):
     return Image.fromarray(gray, mode='L')
 
 
-def change_to_gray(folder_path, mode = 'L'):
+def change_to_gray(folder_path, save_folder, mode = 'L', stop: int = 0):
+    count = 0
+    os.makedirs(save_folder, exist_ok=True)
+    if stop == 0:
+        stop = 9999999999999999999999 # Full dataset
     for image_name in os.listdir(folder_path):
         image_path = os.path.join(folder_path, image_name)
         # Open image
@@ -34,31 +38,36 @@ def change_to_gray(folder_path, mode = 'L'):
         elif mode == 'bt709':
             img_gray = pil_rgb_to_bt709(img)
 
-        img_gray.save(image_path) # Write (ghi de`)
-        print(f'Convert {image_path} to Gray')
-    
+        save_path = os.path.join(save_folder, image_name)
+        img_gray.save(save_path) # Write (ghi de`)
+        print(f'Convert {image_path} → {save_path} to Gray')
+        count+=1
+        if count >= stop:
+            print(f'\n-------------Early stop with quantity: {count}---------------\n')
+            break
 
-def generate_lr(folderpath, shape: int = 5, scale_factor: int = 2): # Need to have hr_gray first
+
+def generate_lr(folderpath, save_folder, shape: int = 5, scale_factor: int = 2): # Need to have hr_gray first
     for image_name in os.listdir(folderpath):
         if 'time_1' not in image_name and 'time_2' not in image_name: #hr
             image_path = os.path.join(folderpath, image_name)
             hr = (Image.open(image_path))
-            H, W = hr.size
+            W, H = hr.size
             # Generate LR_noise time 1, tim 2
             for idx in range(2):
                 hr_noise = np.multiply(hr, np.random.gamma(shape = shape, scale=1/shape, size=hr.size))
                 hr_noise = np.clip(hr_noise, 0, 255).astype(np.uint8)
                 if scale_factor != 1:
                     lr = Image.fromarray(hr_noise).resize((H//scale_factor, W//scale_factor), resample=Image.Resampling.BILINEAR)
-                    lr_path = image_path.split('.')[0]+f'_time_{idx+1}.png'
-                    lr.save(lr_path)
-                    print(f'Gen LR {lr_path}') 
                 else:
-                    lr_path = image_path.split('.')[0]+f'_time_{idx+1}.png'
                     lr = Image.fromarray(hr_noise)
-                    lr.save(lr_path)
-                    print(f'Gen LR {lr_path}') 
+
+                lr_name =  image_name.split('.')[0]+f'_time_{idx+1}.png'
+                lr_path = os.path.join(save_folder, lr_name)
+                lr.save(lr_path)
+                print(f'Gen LR {lr_path}')
+                  
                 
-if __name__ == '__main__':
-    # change_to_gray(r'/mnt/data1tb/vinh/ISSM-SAR/CloudRemovalData/CloudRemovalData_Region2/s2 (1)', mode='bt709')
-    generate_lr(r'/mnt/data1tb/vinh/ISSM-SAR/CloudRemovalData/CloudRemovalData_Region2/s2 (1)', shape=5, scale_factor=1)
+if __name__ == '__main__': # train: 96108
+    # change_to_gray(folder_path=r'/mnt/hdd12tb/code/vinhlc/SGDM_x8_340manh_2022_2023/train/hr_256', save_folder=r'/mnt/hdd12tb/code/vinhlc/issm_sar/dataset/train_1_shape_20', mode = 'L', stop = 150000)
+    generate_lr(folderpath=r'/mnt/hdd12tb/code/vinhlc/issm_sar/dataset/train_1_shape_20', save_folder=r'/mnt/hdd12tb/code/vinhlc/issm_sar/dataset/train_1_shape_20', shape=20, scale_factor=2)
