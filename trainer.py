@@ -2,7 +2,7 @@ import os
 import torch
 from datetime import datetime
 from tqdm import tqdm
-from src import l1_loss, lratio_loss, psnr_torch, ssim_torch
+from src import l1_loss, lratio_loss, psnr_torch, ssim_torch, gradient_loss
 
 class Trainer():
     def __init__(self, model, optimizer, train_loader, valid_loader, device, config, writer, run_name, resume_path = None, kaggle = None):
@@ -10,7 +10,7 @@ class Trainer():
         self.model = model
         self.optimizer = optimizer
         self.device = device
-
+        
         # Loader
         self.train_loader = train_loader
         self.valid_loader = valid_loader
@@ -34,6 +34,7 @@ class Trainer():
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.start_epoch = 1
         self.best_psnr = 0.0
+        self.loss_show = 0.0
         self.total_epochs = self.train_cfg['epochs']
         self.end_epoch = self.start_epoch + self.total_epochs
 
@@ -80,11 +81,12 @@ class Trainer():
         Process an training epoch
         """
         self.model.train()
-        loss_show = 0.0
+        
         tqdm_train_loader = tqdm(self.train_loader, desc=f'Epoch [{epoch}/{self.end_epoch-1}] Train')
 
-        theta_1 = 5.0  # Trọng số cho L_ratio (khử nhiễu)
-        theta_2 = 0.5
+        theta_1 = 3.0  # Trọng số cho L_ratio (khử nhiễu)
+        theta_2 = 1.0
+        theta_3 = 0.5
         # Hàm để denormalize từ [-1, 1] về [0, 1] cho việc tính Loss
         def denorm(x):
             return (x * 0.5 + 0.5).clamp(0, 1)
@@ -99,6 +101,7 @@ class Trainer():
             
             total_ratio_loss = 0.0
             total_l1_loss = 0.0
+            total_grad_loss = 0.0
             
             # compute loss
             # l1_total = (lratio_loss(sr_up[-1], hr) + lratio_loss(sr_down[-1], hr)) + (l1_loss(sr_up[-1], hr) + l1_loss(sr_down[-1], hr))
@@ -110,21 +113,26 @@ class Trainer():
             for idx in range(self.model_cfg['num_ifs']):
                 total_ratio_loss += lratio_loss(denorm(sr_up[idx]), hr) + lratio_loss(denorm(sr_down[idx]), hr)
                 total_l1_loss += l1_loss(denorm(sr_up[idx]), hr) + l1_loss(denorm(sr_down[idx]), hr)
+                total_grad_loss += gradient_loss(denorm(sr_up[idx]), hr) + gradient_loss(denorm(sr_down[idx]), hr)
 
             # 2. Tính loss cho đầu ra cuối cùng (tương ứng L_total^1)
             total_ratio_loss += lratio_loss(denorm(sr_up[-1]), hr) + lratio_loss(denorm(sr_down[-1]), hr)
             total_l1_loss += l1_loss(denorm(sr_up[-1]), hr) + l1_loss(denorm(sr_down[-1]), hr)
+            total_grad_loss += gradient_loss(denorm(sr_up[-1]), hr) + gradient_loss(denorm(sr_down[-1]), hr)
             
             # 3. Tính loss tổng cuối cùng (theo Phương trình 27)
-            loss = (theta_1 * total_ratio_loss) + (theta_2 * total_l1_loss)
+            loss = (theta_1 * total_ratio_loss) + (theta_2 * total_l1_loss) + (theta_3 * total_grad_loss)
 
-            loss_show += loss.item()
+            self.loss_show += loss.item()
             # Thêm 2 dòng này để debug
             if iter % 100 == 0:
-                print(f"\nRatio Loss: {theta_1 * total_ratio_loss.item():.4f}, L1 Loss: {theta_2 * total_l1_loss.item():.4f}")
+                print(f"\nRatio Loss: {theta_1 * total_ratio_loss.item():.4f}, L1 Loss: {theta_2 * total_l1_loss.item():.4f}, Gradient Loss: {theta_3 * total_grad_loss.item():.4f}")
             # backward pass
             self.optimizer.zero_grad()
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+
             self.optimizer.step()
             # Update tqdm
             tqdm_train_loader.set_postfix(Loss=f'{loss.item():.5f}')
@@ -133,16 +141,17 @@ class Trainer():
             # Validation by step
             if (current_global_step + 1) % self.val_step == 0:
                 # Log loss each step
-                avg_loss = loss_show/self.num_iter_train
+                avg_loss = self.loss_show/self.val_step
                 print(f"Step [{current_global_step+1}], Average Train Loss: {avg_loss:.5f}")
-                self.writer.add_scalar(tag='Loss/Train_Step', scalar_value=avg_loss, global_step=current_global_step)
+                self.loss_show = 0.0
+                self.writer.add_scalar(tag='Loss/Train_Step', scalar_value=avg_loss, global_step=current_global_step//self.val_step)
 
-                print(f"\n[Step {current_global_step + 1}] Start Validating...")
+                print(f"\n[Step {(current_global_step + 1)//self.val_step}] Start Validating...")
                 # Validate
                 avg_psnr, avg_ssim = self._validate_epoch(epoch)
                 # Log Metrics by Step
-                self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=current_global_step)
-                self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=current_global_step)
+                self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=current_global_step//self.val_step)
+                self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=current_global_step//self.val_step)
 
                 # Check best & Save Checkpoint
                 is_best = avg_psnr > self.best_psnr
