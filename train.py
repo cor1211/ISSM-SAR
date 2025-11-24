@@ -32,8 +32,8 @@ if __name__ =='__main__':
 
     # Check cuda available and use
     if torch.cuda.is_available():
-        device = torch.device('cuda')
-        print(f'Using GPU {torch.cuda.get_device_name("cuda")}')
+        device = torch.device('cuda:0')
+        print(f'Using GPU {torch.cuda.get_device_name("cuda:0")}')
     else:
         device = torch.device('cpu')
         print('No GPU, using CPU instead')
@@ -66,8 +66,8 @@ if __name__ =='__main__':
     ])
 
     # Train, test set
-    train_set= SarDataset(root = data_cfg['root'], train=True, transform=transform)
-    valid_set= SarDataset(root = data_cfg['root'], train=False, transform=transform)
+    train_set= SarDataset(root = data_cfg['root'], train=True, transform=transform, config=data_cfg)
+    valid_set= SarDataset(root = data_cfg['root'], train=False, transform=transform, config=data_cfg)
 
     # Train, test loader
     train_loader = DataLoader(
