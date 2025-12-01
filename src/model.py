@@ -19,13 +19,10 @@ def load_config(config_path: str):
 # --- HELPER FUNCTION CHO NORMALIZATION ---
 def get_norm_layer(channels, use_bn=False, use_gn=False, num_groups=8):
     if use_gn:
-        # Fallback an toàn:
-        # 1. Nếu channels < num_groups mặc định -> num_groups = channels (Mỗi channel 1 group - Instance Norm)
-        # 2. Nếu không chia hết -> giảm num_groups xuống ước số gần nhất (hoặc đơn giản là chia 2)
         if channels < num_groups:
-             real_groups = 1 # Hoặc channels tuỳ bạn, nhưng an toàn nhất là 1 (LayerNorm)
+             real_groups = 1 
         elif channels % num_groups != 0:
-            real_groups = int(channels / 2) # Fallback
+            real_groups = int(channels / 2) 
             if real_groups == 0: real_groups = 1 # Tránh chia cho 0
         else:
             real_groups = num_groups

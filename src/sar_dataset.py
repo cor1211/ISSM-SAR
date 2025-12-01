@@ -5,9 +5,9 @@ from PIL import Image
 import os
 
 class SarDataset(Dataset):
-    def __init__(self, root: str, train:bool = True, transform= None):
+    def __init__(self, root: str, train:bool = True, transform= None, config:str = None):
         self.transform = transform
-        root = os.path.join(root, 'train' if train else 'test')
+        root = os.path.join(root, config['train_folder_name'] if train else config['valid_folder_name'])
         self.lr_time_1 = []
         self.lr_time_2 = []
         self.hr = []

@@ -6,23 +6,30 @@ from src import l1_loss, lratio_loss, psnr_torch, ssim_torch, gradient_loss
 
 class Trainer():
     def __init__(self, model, optimizer, train_loader, valid_loader, device, config, writer, run_name, resume_path = None, kaggle = None):
+        # config
+        self.config = config
+        self.train_cfg = self.config['train']
+        self.model_cfg = self.config['model']
+        self.val_step = self.train_cfg['val_step']
+        
         # Model
         self.model = model
         self.optimizer = optimizer
         self.device = device
-        
+
+        # coefficent loss
+        self.theta_1 = self.train_cfg['theta_1']
+        self.theta_2 = self.train_cfg['theta_2']
+        self.theta_3 = self.train_cfg['theta_3']
+        self.component_loss = self.train_cfg['component_loss']
+
         # Loader
         self.train_loader = train_loader
         self.valid_loader = valid_loader
         self.num_iter_train = len(self.train_loader)
         self.num_iter_valid = len(self.valid_loader)
 
-        # config
-        self.config = config
-        self.train_cfg = self.config['train']
-        self.model_cfg = self.config['model']
-        self.val_step = self.train_cfg['val_step']
-
+        
         # log, checkpoint
         self.writer = writer
         self.resume_path =resume_path
@@ -84,10 +91,7 @@ class Trainer():
         
         tqdm_train_loader = tqdm(self.train_loader, desc=f'Epoch [{epoch}/{self.end_epoch-1}] Train')
 
-        theta_1 = 3.0  # Trọng số cho L_ratio (khử nhiễu)
-        theta_2 = 1.0
-        theta_3 = 0.5
-        # Hàm để denormalize từ [-1, 1] về [0, 1] cho việc tính Loss
+
         def denorm(x):
             return (x * 0.5 + 0.5).clamp(0, 1)
         
@@ -103,30 +107,24 @@ class Trainer():
             total_l1_loss = 0.0
             total_grad_loss = 0.0
             
-            # compute loss
-            # l1_total = (lratio_loss(sr_up[-1], hr) + lratio_loss(sr_down[-1], hr)) + (l1_loss(sr_up[-1], hr) + l1_loss(sr_down[-1], hr))
-            # l2_total = 0
-            # for idx in range(self.model_cfg['num_ifs']):
-            #     l2_total += (lratio_loss(sr_up[idx], hr) + lratio_loss(sr_down[idx], hr)) + (l1_loss(sr_up[idx], hr) + l1_loss(sr_down[idx], hr))
-            # loss = l1_total + l2_total
 
             for idx in range(self.model_cfg['num_ifs']):
                 total_ratio_loss += lratio_loss(denorm(sr_up[idx]), hr) + lratio_loss(denorm(sr_down[idx]), hr)
                 total_l1_loss += l1_loss(denorm(sr_up[idx]), hr) + l1_loss(denorm(sr_down[idx]), hr)
                 total_grad_loss += gradient_loss(denorm(sr_up[idx]), hr) + gradient_loss(denorm(sr_down[idx]), hr)
 
-            # 2. Tính loss cho đầu ra cuối cùng (tương ứng L_total^1)
-            total_ratio_loss += lratio_loss(denorm(sr_up[-1]), hr) + lratio_loss(denorm(sr_down[-1]), hr)
-            total_l1_loss += l1_loss(denorm(sr_up[-1]), hr) + l1_loss(denorm(sr_down[-1]), hr)
-            total_grad_loss += gradient_loss(denorm(sr_up[-1]), hr) + gradient_loss(denorm(sr_down[-1]), hr)
+            if self.component_loss:
+                total_ratio_loss += lratio_loss(denorm(sr_up[-1]), hr) + lratio_loss(denorm(sr_down[-1]), hr)
+                total_l1_loss += l1_loss(denorm(sr_up[-1]), hr) + l1_loss(denorm(sr_down[-1]), hr)
+                total_grad_loss += gradient_loss(denorm(sr_up[-1]), hr) + gradient_loss(denorm(sr_down[-1]), hr)
             
-            # 3. Tính loss tổng cuối cùng (theo Phương trình 27)
-            loss = (theta_1 * total_ratio_loss) + (theta_2 * total_l1_loss) + (theta_3 * total_grad_loss)
+            
+            loss = (self.theta_1 * total_ratio_loss) + (self.theta_2 * total_l1_loss) + (self.theta_3 * total_grad_loss)
 
             self.loss_show += loss.item()
-            # Thêm 2 dòng này để debug
+       
             if iter % 100 == 0:
-                print(f"\nRatio Loss: {theta_1 * total_ratio_loss.item():.4f}, L1 Loss: {theta_2 * total_l1_loss.item():.4f}, Gradient Loss: {theta_3 * total_grad_loss.item():.4f}")
+                print(f"\nRatio Loss: {self.theta_1 * total_ratio_loss.item():.4f}, L1 Loss: {self.theta_2 * total_l1_loss.item():.4f}, Gradient Loss: {self.theta_3 * total_grad_loss.item():.4f}")
             # backward pass
             self.optimizer.zero_grad()
             loss.backward()
@@ -142,7 +140,7 @@ class Trainer():
             if (current_global_step + 1) % self.val_step == 0:
                 # Log loss each step
                 avg_loss = self.loss_show/self.val_step
-                print(f"Step [{current_global_step+1}], Average Train Loss: {avg_loss:.5f}")
+                print(f"Step [{(current_global_step+1)//self.val_step}], Average Train Loss: {avg_loss:.5f}")
                 self.loss_show = 0.0
                 self.writer.add_scalar(tag='Loss/Train_Step', scalar_value=avg_loss, global_step=current_global_step//self.val_step)
 
@@ -215,20 +213,6 @@ class Trainer():
             # training
             self._train_epoch(epoch)
             
-            # # validate
-            # avg_psnr, avg_ssim = self._validate_epoch(epoch)
-            
-            # # logging
-            # self.writer.add_scalar(tag='Loss/Train', scalar_value=avg_loss, global_step=epoch)
-            # self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=epoch)
-            # self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=epoch)
-
-            # # Save checkpoint
-            # is_best = avg_psnr > self.best_psnr
-            # if is_best:
-            #     self.best_psnr = avg_psnr
-            # self._save_checkpoint(epoch, is_best)
-        
         self.writer.close()
         print("Training finished.")
             
