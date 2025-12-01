@@ -33,8 +33,8 @@ def load_image_tensor(image_path: str, transform: Compose) -> torch.Tensor:
 
 def load_device():
     if torch.cuda.is_available():
-        device = torch.device('cuda')
-        print(f'Using GPU {torch.cuda.get_device_name("cuda")}')
+        device = torch.device('cuda:0')
+        print(f'Using GPU {torch.cuda.get_device_name("cuda:0")}')
     else:
         device = torch.device('cpu')
         print('No GPU, using CPU instead')
@@ -47,7 +47,7 @@ if __name__ == '__main__':
     parser.add_argument('--image_path_1', type=str, default='/mnt/data1tb/vinh/ISSM-SAR/dataset/test/1_0_F_48_69_C_c_1_time_1.png')
     parser.add_argument('--config_path', type=str, default= '/mnt/data1tb/vinh/ISSM-SAR/config/base_config.yaml', help='Path to the YAML config file')
     parser.add_argument('--checkpoint_path', type=str, default='/mnt/data1tb/vinh/ISSM-SAR/checkpoints/exp_20251110-135418/best.pth')
-    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--device', choices=['cuda', 'cpu'], help='device to run')
     args = parser.parse_args()
 
     # Check config_path
@@ -68,8 +68,8 @@ if __name__ == '__main__':
 
     # Check cuda avalable
     if args.device == 'cuda':
-        device = torch.device('cuda')
-        print(f'Using GPU {torch.cuda.get_device_name("cuda")}')
+        device = torch.device('cuda:0')
+        print(f'Using GPU {torch.cuda.get_device_name("cuda:0")}')
     elif args.device == 'cpu':
         device = torch.device('cpu')
         print('No GPU, using CPU instead')
@@ -87,7 +87,11 @@ if __name__ == '__main__':
 
     # Transforming image to tensor [-1, 1]
     img_path_1 = args.image_path_1
+    print(img_path_1)
+    # Image.open(img_path_1).show()
     img_path_2 = img_path_1.replace('time_1', 'time_2')
+    print(img_path_2)
+    # Image.open(img_path_2).show()
     transformed_img_1 = load_image_tensor(img_path_1, transform).to(device)
     transformed_img_2 = load_image_tensor(img_path_2, transform).to(device)
 
