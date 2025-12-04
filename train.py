@@ -1,5 +1,5 @@
 import torch
-from src import ISSM_SAR, SarDataset, lratio_loss, l1_loss, psnr_torch, ssim_torch
+from src import ISSM_SAR, SarDataset
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, ToTensor, Normalize
 from tqdm import tqdm
@@ -10,6 +10,8 @@ import os
 import yaml
 import argparse
 from trainer import Trainer
+from pathlib import Path
+import sys
 
 def load_config(config_path: str):
     with open(config_path, 'r') as file:
@@ -25,7 +27,7 @@ if __name__ =='__main__':
     args = parser.parse_args()
 
     # Load config
-    config = load_config(args.config_path)
+    config = load_config(Path(args.config_path))
     data_cfg = config['data']
     train_cfg = config['train']
     model_cfg = config['model']
@@ -39,15 +41,17 @@ if __name__ =='__main__':
         print('No GPU, using CPU instead')
 
     # run_name
+    ckpt_path = None
     if args.checkpoint_path:
-        if not os.path.exists(args.checkpoint_path):
-            print('Checkpoint path not found. End!')
-            exit()
+        ckpt_path = Path(args.checkpoint_path)
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f'Checkpoint path {ckpt_path} not found. End!')
+        
         try:
-            run_name = args.checkpoint_path.split('/')[-2]
+            run_name = ckpt_path.parent.name
         except Exception as e:
-            print('Invalid check point path')
-            exit()
+            print(f'Can not extract run_name at {ckpt_path}: {e}')
+            sys.exit(1)
     else:
         run_name = f'exp_{datetime.now().strftime("%Y%m%d-%H%M%S")}'
 
@@ -91,7 +95,7 @@ if __name__ =='__main__':
     optimizer = Adam(model.parameters(), lr=train_cfg['lr'])
 
     # Training
-    trainer = Trainer(model, optimizer, train_loader, valid_loader, device, config, writer, run_name, args.checkpoint_path, args.kaggle)
+    trainer = Trainer(model, optimizer, train_loader, valid_loader, device, config, writer, run_name, ckpt_path, args.kaggle)
     trainer.run()
 
 

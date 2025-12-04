@@ -8,27 +8,30 @@ from torch.optim import Adam
 from torchvision.transforms import ToTensor, Normalize, Compose
 from PIL import Image
 import numpy as np
+from pathlib import Path
+import sys
 
 def load_config(config_path: str) -> dict:
     try: 
         with open(config_path, 'r') as file:
             config = yaml.safe_load(file)
         return config
-    except:
-        print('Invalid yaml config file')
-        exit()
+    except Exception as e:
+        print(f'Invalid yaml config file: {e}')
+        sys.exit(1)
 
 
 def load_image_tensor(image_path: str, transform: Compose) -> torch.Tensor:
     try:
-        image = Image.open(image_path).convert('L')
-    except FileNotFoundError:
-        print(f'Error: Not found image at {image_path}')
-        exit()
+        image = Image.open(Path(image_path)).convert('L')
+        # transform
+        transformed_img = transform(image) # [C, H, W]
+        return transformed_img.unsqueeze(0) # [1, C, H, W]
+    except Exception as e:
+        print(f'Can open image at {image_path}: {e}')
+        sys.exit(1)
     
-    # transform
-    transformed_img = transform(image) # [C, H, W]
-    return transformed_img.unsqueeze(0) # [1, C, H, W]
+    
 
 
 def load_device():
@@ -51,20 +54,20 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Check config_path
-    if not os.path.exists(args.config_path):
-        print('Config path not exist. End!')
-        exit()
+    if not os.path.exists(Path(args.config_path)):
+        raise FileNotFoundError(f'Not found config file at {Path(args.config_path)}')
+    
 
     # Load config
-    config = load_config(args.config_path)
+    config = load_config(Path(args.config_path))
     data_cfg = config['data']
     train_cfg = config['train']
     model_cfg = config['model']
 
     # Check checkpoint_path
-    if not os.path.exists(args.checkpoint_path):
-        print('Checkpoint path not exist. End!')
-        exit()
+    if not os.path.exists(Path(args.checkpoint_path)):
+        raise FileNotFoundError(f'Not found checkpoint file at {Path(args.checkpoint_path)}')
+
 
     # Check cuda avalable
     if args.device == 'cuda':
@@ -97,7 +100,7 @@ if __name__ == '__main__':
 
     # Init model
     model = ISSM_SAR(config=model_cfg).to(device)
-    checkpoint = torch.load(args.checkpoint_path)
+    checkpoint = torch.load(Path(args.checkpoint_path))
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
@@ -106,7 +109,7 @@ if __name__ == '__main__':
         sr_up, sr_down = model(transformed_img_1, transformed_img_2)
     
     # ---------------- Transforming sr to [0, 255] -------------------
-    sr_fusion = 0.5 * sr_up[-1] + 0.5 * sr_down[-1]
+    sr_fusion = 0.5 * sr_up[0] + 0.5 * sr_down[0]
     sr_fusion = sr_fusion.squeeze(0).squeeze(0)  # Remove batch and channel dims -> (H, W)
     sr_fusion = (sr_fusion * 0.5 + 0.5).clamp(0, 1)
     output_image = (sr_fusion.cpu() * 255).clamp(0, 255).byte().numpy()  # Convert to uint8

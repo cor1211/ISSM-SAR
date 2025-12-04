@@ -17,7 +17,7 @@ def lratio_loss(output: torch.Tensor,target: torch.Tensor,eps: float = 1e-6,) ->
 def l1_loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(output, target)
 
-# Đặt ở đầu file hoặc import từ src
+
 def gradient_loss(pred, target):
     # Tính đạo hàm theo phương ngang (x) và dọc (y)
     # pred shape: (B, C, H, W)

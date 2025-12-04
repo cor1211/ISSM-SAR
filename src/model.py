@@ -10,6 +10,10 @@ from torchvision.ops import DeformConv2d
 from torchinfo import summary
 import yaml
 import argparse
+from torchviz import make_dot
+from torch.utils.tensorboard import SummaryWriter
+import os
+from torchview import draw_graph
 
 def load_config(config_path: str):
     with open(config_path, 'r') as file:
@@ -408,8 +412,8 @@ if __name__ == '__main__':
 
 
     if torch.cuda.is_available():
-        device = torch.device('cuda')
-        print(f'Using GPU {torch.cuda.get_device_name(device)}')
+        device = torch.device('cuda:0')
+        # print(f'Using GPU {torch.cuda.get_device_name(device)}')
     else:
         device = torch.device('cpu')
         print(f'No GPU. Using CPU instead')
@@ -424,5 +428,31 @@ if __name__ == '__main__':
     for idx in range(4):
         print(sr_up[idx].shape, sr_down[idx].shape)
     
-    summary(issm_sar, input_size=[(4,1, 128,128),(4,1,128,128)])
+    summary(issm_sar, input_size=[(1,1, 128,128),(1,1,128,128)])
+
+    # dot = make_dot((sum(sum(t) for t in sr_up) +  sum(sum(t) for t in sr_down)), params=dict(issm_sar.named_parameters()))
+    # dot.render('graph', format='png')
     
+    # log_dir = os.path.join('runs', 'graph')
+    # os.makedirs(log_dir, exist_ok = True)
+    # writer = SummaryWriter(log_dir=log_dir)
+    # print(f"TensorBoard Graph logs will be saved to: {log_dir}")
+    # writer.add_graph(issm_sar, [input_first_time, input_second_time])
+    # writer.close()
+
+    # onnx_filename = "multi_input_model.onnx"
+    # torch.onnx.export(
+    #     issm_sar, 
+    #     (input_first_time, input_second_time),
+    #     onnx_filename,
+    #     export_params=True,
+    #     opset_version=11,
+    #     do_constant_folding=True,
+    #     input_names=['in1','in2'],
+    #     output_names=['out'],
+    #     dynamic_axes={'input1': {0: 'batch_size'}, 'input2': {0: 'batch_size'}, 'output': {0: 'batch_size'}} # Optional: Define dynamic axes
+    # )
+    # print(f'Model exported to {onnx_filename}')
+
+    model_graph = draw_graph(issm_sar, input_size=[(1, 1, 128, 128), (1, 1, 128, 128)], expand_nested=True)
+    model_graph.visual_graph.render(format='svg')
