@@ -210,7 +210,7 @@ class REC(nn.Module): # In = [N, out_HFE, H, W] | Out = [N, 1, 2H, 2W]
         super().__init__()
         self.rec = nn.Sequential(
             DeConvBlock(in_c=in_c, out_c=in_c, kernel_size=6, padding=2, stride=2, act_type='prelu', use_bn=use_bn, use_gn= use_gn),
-            ConvBlock(in_c=in_c, out_c=out_c, kernel_size=3, padding=1, stride = 1, act_type='none', use_bn=False, use_gn= False)
+            ConvBlock(in_c=in_c, out_c=out_c, kernel_size=3, padding=1, stride = 1, act_type='none', use_bn=use_bn, use_gn= use_gn)
         )
     def forward(self, x):
         x = self.rec(x)
@@ -290,6 +290,7 @@ class IFS(nn.Module):
         self.compress_out = ConvBlock(in_c=num_groups*in_c, out_c=out_c, kernel_size=1, padding=0, stride=1, act_type='prelu', use_bn=use_bn, use_gn= use_gn)
 
     def forward(self, f_in, h_same_way, h_other_way):
+        re_guided = False
         x = torch.concat((f_in, h_same_way, h_other_way), dim=1) # Out = [N, 3*in_c, H, W]
         x = self.compress_in(x) # Out = [N, in_c, H, W]
 
@@ -298,7 +299,11 @@ class IFS(nn.Module):
         lr_features.append(x)
 
         for idx in range(self.num_groups):
-            LR_F = torch.concat(lr_features, dim=1) # idx 0: Out = [N, in_c, H, W]
+            if not re_guided:
+                LR_F = torch.concat(lr_features, dim=1) # idx 0: Out = [N, in_c, H, W]
+            else:
+                LR_F = torch.concat([lr_features[i] for i in range(len(lr_features)) if (i-1) != (self.num_groups//2)], dim = 1)
+
             if idx > 0:
                 LR_F = self.uptranBlocks[idx - 1](LR_F) # Out = [N, in_c, H, W]
             HR_F = self.upBlocks[idx](LR_F) # idx 0: Out = [N, in_c, 2H, 2W]
@@ -310,13 +315,15 @@ class IFS(nn.Module):
             LR_F = self.downBlocks[idx](HR_F)
 
             if idx == int(self.num_groups//2):
+                re_guided = True
+                lr_features.append(LR_F) # append after concating with other_way
                 LR_F = torch.concat((LR_F, h_other_way), dim=1)
                 LR_F = self.re_guide(LR_F)
             
             lr_features.append(LR_F)
         
         del hr_features
-        output = torch.concat(lr_features[1:], dim=1) # Out = [N, 3in_c, H, W]
+        output = torch.concat([lr_features[i] for i in range(len(lr_features)) if (i-2) != (self.num_groups//2) and i != 0], dim=1) # Out = [N, 3in_c, H, W]
         output = self.compress_out(output) # Out = [N, in_c, H, W]
         return output
 
@@ -430,29 +437,5 @@ if __name__ == '__main__':
     
     summary(issm_sar, input_size=[(1,1, 128,128),(1,1,128,128)])
 
-    # dot = make_dot((sum(sum(t) for t in sr_up) +  sum(sum(t) for t in sr_down)), params=dict(issm_sar.named_parameters()))
-    # dot.render('graph', format='png')
-    
-    # log_dir = os.path.join('runs', 'graph')
-    # os.makedirs(log_dir, exist_ok = True)
-    # writer = SummaryWriter(log_dir=log_dir)
-    # print(f"TensorBoard Graph logs will be saved to: {log_dir}")
-    # writer.add_graph(issm_sar, [input_first_time, input_second_time])
-    # writer.close()
-
-    # onnx_filename = "multi_input_model.onnx"
-    # torch.onnx.export(
-    #     issm_sar, 
-    #     (input_first_time, input_second_time),
-    #     onnx_filename,
-    #     export_params=True,
-    #     opset_version=11,
-    #     do_constant_folding=True,
-    #     input_names=['in1','in2'],
-    #     output_names=['out'],
-    #     dynamic_axes={'input1': {0: 'batch_size'}, 'input2': {0: 'batch_size'}, 'output': {0: 'batch_size'}} # Optional: Define dynamic axes
-    # )
-    # print(f'Model exported to {onnx_filename}')
-
     model_graph = draw_graph(issm_sar, input_size=[(1, 1, 128, 128), (1, 1, 128, 128)], expand_nested=True)
-    model_graph.visual_graph.render(format='svg')
+    model_graph.visual_graph.render(format='svg', filename='ifs_architecture_rework')

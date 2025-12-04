@@ -140,16 +140,16 @@ class Trainer():
             if (current_global_step + 1) % self.val_step == 0:
                 # Log loss each step
                 avg_loss = self.loss_show/self.val_step
-                print(f"Step [{(current_global_step+1)//self.val_step}], Average Train Loss: {avg_loss:.5f}")
+                print(f"Step [{(current_global_step+1)}], Average Train Loss: {avg_loss:.5f}")
                 self.loss_show = 0.0
-                self.writer.add_scalar(tag='Loss/Train_Step', scalar_value=avg_loss, global_step=current_global_step//self.val_step)
+                self.writer.add_scalar(tag='Loss/Train_Step', scalar_value=avg_loss, global_step=current_global_step)
 
-                print(f"\n[Step {(current_global_step + 1)//self.val_step}] Start Validating...")
+                print(f"\n[Step {(current_global_step + 1)}] Start Validating...")
                 # Validate
                 avg_psnr, avg_ssim = self._validate_epoch(epoch)
                 # Log Metrics by Step
-                self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=current_global_step//self.val_step)
-                self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=current_global_step//self.val_step)
+                self.writer.add_scalar(tag='Metrics/PSNR', scalar_value=avg_psnr, global_step=current_global_step)
+                self.writer.add_scalar(tag='Metrics/SSIM', scalar_value=avg_ssim, global_step=current_global_step)
 
                 # Check best & Save Checkpoint
                 is_best = avg_psnr > self.best_psnr

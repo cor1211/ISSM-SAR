@@ -1,6 +1,8 @@
 
 import torch
 import torch.nn.functional as F
+import numpy as np
+
 
 def psnr_torch(img1: torch.Tensor, img2: torch.Tensor, max_val: float = 1.0) -> torch.Tensor:
     """
@@ -12,17 +14,47 @@ def psnr_torch(img1: torch.Tensor, img2: torch.Tensor, max_val: float = 1.0) -> 
         img2 = img2.float()
 
     mse = torch.mean((img1 - img2) ** 2)
+    print(mse)
     if mse == 0:
         return torch.tensor(float('inf'))
     psnr = 10 * torch.log10(max_val ** 2 / mse)
     return psnr
 
+def compute_psnr(img1: torch.Tensor, img2: torch.Tensor, max_val: float = 1.0) -> torch.Tensor:
+    """
+    Compute PSNR per image for inputs with shape [B, C, H, W] (or [C, H, W]).
+    Returns a tensor of shape [B] with PSNR in dB.
+    """
+    # support single image input [C, H, W]
+    if img1.dim() == 3:
+        img1 = img1.unsqueeze(0)
+        img2 = img2.unsqueeze(0)
 
+    assert img1.shape == img2.shape and img1.dim() == 4, "Inputs must have shape [B, C, H, W]"
+
+    if img1.dtype != torch.float32:
+        img1 = img1.float()
+    if img2.dtype != torch.float32:
+        img2 = img2.float()
+
+    # MSE per image in the batch
+    mse = torch.mean((img1 - img2) ** 2, dim=(1, 2, 3))
+    print(f'New mse: {mse.shape}')
+    # avoid log10(0); set PSNR to +inf where mse == 0
+    zero_mask = mse == 0
+    print('zero_mask: ', zero_mask)
+    safe_mse = mse.clone()
+    safe_mse[zero_mask] = 1e-10
+
+    psnr = 10.0 * torch.log10((max_val ** 2) / safe_mse)
+    if zero_mask.any():
+        psnr[zero_mask] = float('inf')
+
+    return torch.mean(psnr)
 
 
 def ssim_torch(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, max_val: float = 1.0) -> torch.Tensor:
     """
-    SSIM tính bằng thuần PyTorch, không cần torchmetrics
     img1, img2: Tensor [B, C, H, W] với giá trị [0, 1]
     """
     if img1.dtype != torch.float32:
@@ -58,3 +90,9 @@ def ssim_torch(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, ma
                ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
     return ssim_map.mean()
+
+if __name__ == '__main__':
+    img1 = torch.rand(4, 1, 256, 256)
+    img2 = torch.rand(4, 1, 256, 256)
+    print(psnr_torch(img1, img2))
+    print(compute_psnr(img1, img2))

@@ -12,36 +12,36 @@ train:
   epochs: 50
   lr: 0.00001
   val_step: 300
-  theta_1: 1.0
-  theta_2: 1.0
-  theta_3: 3.0
+  theta_1: 5.0
+  theta_2: 0.5
+  theta_3: 0.0
   component_loss: True
 
 # Model architecture config
 model:
   num_ifs: 3
-  use_bn: False
-  use_gn: True
+  use_bn: True
+  use_gn: False
 
   pfe:
     in_channels: 1
-    out_channels: 80
+    out_channels: 64
   
   hfe:
-    in_c: 80
-    out_c: 80
+    in_c: 64
+    out_c: 64
     kernel_size: 6
     padding: 2
     stride: 2
     num_blocks: 4
   
   rec:
-    in_c: 80
+    in_c: 64
     out_c: 1
 
   ifs:
-    in_c: 80
-    out_c: 80
+    in_c: 64
+    out_c: 64
     num_groups: 3
     kernel_size: 6
     padding: 2
