@@ -1,0 +1,25 @@
+# Config for cropping and saving raw SAR data as .npy files
+# Data is clipped to [v_min, v_max] and normalized to [-1, 1]
+
+chip_size: 128
+data_dir: /mnt/data1tb/vinh/data_tumlum/s1t2_-7_0_days_281manh
+split_dir_raw: /mnt/data1tb/vinh/data_tumlum/s1t2_-7_0_days_281manh_raw_npy
+split_factor: 4
+
+# Remove alpha channel (if applicable)
+remove_A: False
+
+# Select SAR channel: VV or VH
+sar_vv: True
+sar_vh: False
+
+# Clip range (dB values)
+v_min: -25
+v_max: 5
+
+# Save format: 'npy' or 'npz' (compressed)
+raw_save_fmt: npy
+
+# Blacklist and whitelist paths
+black_list_path: /mnt/data1tb/vinh/ISSM-SAR/utils/black_list.txt
+white_list_path: /mnt/data1tb/vinh/ISSM-SAR/utils/matching_tif_files.txt

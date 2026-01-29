@@ -1,0 +1,14 @@
+chip_size: 128
+data_dir: /mnt/data1tb/vinh/data_tumlum/s1t2_-7_0_days_281manh
+split_dir: /mnt/data1tb/vinh/data_tumlum/s1t2_-7_0_days_cutted
+split_factor: 4
+remove_A: False
+db2ln: True
+sar_vv: True
+sar_vh: False
+change_range: False
+downsample: 0
+four_bands: False
+save_fmt: PNG
+black_list_path: /mnt/data1tb/vinh/ISSM-SAR/utils/black_list.txt
+white_list_path: /mnt/data1tb/vinh/ISSM-SAR/utils/matching_tif_files.txt

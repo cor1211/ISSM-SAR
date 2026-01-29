@@ -1,0 +1,97 @@
+# Visualization Configuration for Triplet Images
+# S1T1 (SAR Time 1), S1T2 (SAR Time 2), S1SR (SAR Super Resolution)
+
+# Input directories
+s1t1_dir: "/mnt/data1tb/vinh/data_tumlum/s1t1_0_7_days_cutted"  # Path to S1T1 folder (contains .png, .jpg, .tif files)
+s1t2_dir: "/mnt/data1tb/vinh/data_tumlum/s1t2_-7_0_days_cutted"  # Path to S1T2 folder (same filenames as S1T1)
+s1sr_dir: "/mnt/data1tb/vinh/TemporalGAN/infer-srsar_2-results"  # Path to S1SR folder (contains subfolders with s1_gen.png)
+
+# Output directory
+output_dir: "/mnt/data1tb/vinh/ISSM-SAR/visualize_s1t1_s1t2_s1sr"  # Path to save visualization results
+
+# ============== Basic Options ==============
+# Image formats to search for
+image_extensions:
+  - "*.png"
+  - "*.jpg"
+  - "*.tif"
+  - "*.tiff"
+
+# ============== Advanced Options ==============
+# Limit number of images to process
+max_images: null  # Set to integer (e.g., 100) to limit, null for all images
+
+# Process only files matching a pattern (regex)
+filename_pattern: null  # e.g., "^scene_.*" to match files starting with "scene_"
+
+# Skip files matching a pattern
+skip_pattern: null  # e.g., "backup|temp" to skip files containing these words
+
+# Start processing from index (useful for resuming)
+start_index: 0
+
+# ============== Visualization Options ==============
+# Figure size (width, height)
+figure_size:
+  width: 12
+  height: 4
+
+# Image display options
+image_colormap: "gray"  # Colormap for displaying images (gray, viridis, etc.)
+interpolation: "nearest"  # Image interpolation method (nearest, bilinear, bicubic)
+
+# Title options
+show_title: true
+title_fontsize: 12
+title_position: "top"
+
+# Axis options
+show_axis: false  # Show axis ticks and labels
+
+# Spacing between subplots
+wspace: 0.05  # Width space between columns
+hspace: 0.3   # Height space between rows
+
+# ============== Save Options ==============
+# Output image format
+save_format: "png"  # png, jpg, tif, etc.
+
+# Save quality/DPI
+save_dpi: 150
+
+# Save padding
+bbox_inches: "tight"
+pad_inches: 0.05
+
+# Include metadata in filename
+add_timestamp: false  # Add timestamp to output files
+add_index: false      # Add processing index to output files
+
+# ============== Processing Options ==============
+# Verbosity level
+verbose: true
+
+# Report missing files
+report_missing: true
+
+# Skip if any image is missing (S1T1, S1T2, or S1SR)
+skip_incomplete: true
+
+# Create summary report
+create_report: true
+report_format: "txt"  # txt or csv
+
+# ============== Performance Options ==============
+# Number of parallel workers for processing
+num_workers: 1  # Set to > 1 for parallel processing
+
+# Batch size for processing
+batch_size: 1
+
+# ============== Error Handling ==============
+# Continue processing on error
+continue_on_error: true
+
+# Log errors to file
+log_errors: true
+error_log_path: "visualization_errors.log"

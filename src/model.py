@@ -4,15 +4,15 @@ import torch.nn.functional as F
 # from torch import squeeze, transpose, unsqueeze
 from pytorch_wavelets import DWTForward, DWTInverse
 import math
-from PIL import Image 
-from torchvision.transforms import Resize,ToTensor, InterpolationMode
+# from PIL import Image 
+# from torchvision.transforms import Resize,ToTensor, InterpolationMode
 from torchvision.ops import DeformConv2d
 from torchinfo import summary
 import yaml
 import argparse
-from torchviz import make_dot
-from torch.utils.tensorboard import SummaryWriter
-import os
+# from torchviz import make_dot
+# from torch.utils.tensorboard import SummaryWriter
+# import os
 from torchview import draw_graph
 
 def load_config(config_path: str):
@@ -26,8 +26,9 @@ def get_norm_layer(channels, use_bn=False, use_gn=False, num_groups=8):
         if channels < num_groups:
              real_groups = 1 
         elif channels % num_groups != 0:
-            real_groups = int(channels / 2) 
-            if real_groups == 0: real_groups = 1 # Tránh chia cho 0
+            # FIX: Ensure channels is divisible by real_groups
+            # Fallback to 1 group (LayerNorm) if not divisible
+            real_groups = 1
         else:
             real_groups = num_groups
             
@@ -137,7 +138,7 @@ class DeFormBlock(nn.Module):
         self.norm = get_norm_layer(out_c, use_bn, use_gn, num_groups=8)
         self.act = ''
         if act_type.lower() =='prelu':
-            self.act = nn.PReLU(num_parameters=1, init=0.2)
+            self.act = nn.PReLU(num_parameters=out_c, init=0.2)
         elif act_type.lower() == 'relu':
             self.act = nn.ReLU(True)
         
@@ -156,7 +157,7 @@ class DeFormBlockv2(nn.Module):
         self.bn = get_norm_layer(out_c, use_bn, use_gn, num_groups=8)
         self.act = ''
         if act_type.lower() =='prelu':
-            self.act = nn.PReLU(num_parameters=1, init=0.2)
+            self.act = nn.PReLU(num_parameters=out_c, init=0.2)
         elif act_type.lower() == 'relu':
             self.act = nn.ReLU(True)
         
@@ -227,7 +228,7 @@ class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow sc
         self.deconv.append(get_norm_layer(out_c, use_bn, use_gn, num_groups=8))
 
         if act_type.lower() =='prelu':
-            self.deconv.append(nn.PReLU(num_parameters=1, init=0.2))
+            self.deconv.append(nn.PReLU(num_parameters=out_c, init=0.2))
         elif act_type.lower() == 'relu':
             self.deconv.append(nn.ReLU(True))
 
@@ -245,7 +246,7 @@ class ConvBlock(nn.Module):
         self.conv.append(get_norm_layer(channels=out_c, use_bn=use_bn, use_gn=use_gn, num_groups=8))
 
         if act_type.lower() =='prelu':
-            self.conv.append(nn.PReLU(num_parameters=1, init=0.2))
+            self.conv.append(nn.PReLU(num_parameters=out_c, init=0.2))
         elif act_type.lower() == 'relu':
             self.conv.append(nn.ReLU(True))
 
@@ -391,9 +392,10 @@ class ISSM_SAR(nn.Module):
         sr_up = []
         sr_down = []
         for idx in range(self.num_ifs+1):
-            sr_up.append(torch.clamp((self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled), -1.0, 1.0))# Out (-255, 255)
-            sr_down.append(torch.clamp((self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled), -1.0, 1.0))
-
+            # sr_up.append(torch.clamp((self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled), -1.0, 1.0))# Out (-255, 255)
+            # sr_down.append(torch.clamp((self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled), -1.0, 1.0))
+            sr_up.append(self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled) # Remove clamp [-1, 1]
+            sr_down.append(self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled)
         
         return sr_up, sr_down
 
@@ -430,29 +432,6 @@ if __name__ == '__main__':
     
     summary(issm_sar, input_size=[(1,1, 128,128),(1,1,128,128)])
 
-    # dot = make_dot((sum(sum(t) for t in sr_up) +  sum(sum(t) for t in sr_down)), params=dict(issm_sar.named_parameters()))
-    # dot.render('graph', format='png')
-    
-    # log_dir = os.path.join('runs', 'graph')
-    # os.makedirs(log_dir, exist_ok = True)
-    # writer = SummaryWriter(log_dir=log_dir)
-    # print(f"TensorBoard Graph logs will be saved to: {log_dir}")
-    # writer.add_graph(issm_sar, [input_first_time, input_second_time])
-    # writer.close()
-
-    # onnx_filename = "multi_input_model.onnx"
-    # torch.onnx.export(
-    #     issm_sar, 
-    #     (input_first_time, input_second_time),
-    #     onnx_filename,
-    #     export_params=True,
-    #     opset_version=11,
-    #     do_constant_folding=True,
-    #     input_names=['in1','in2'],
-    #     output_names=['out'],
-    #     dynamic_axes={'input1': {0: 'batch_size'}, 'input2': {0: 'batch_size'}, 'output': {0: 'batch_size'}} # Optional: Define dynamic axes
-    # )
-    # print(f'Model exported to {onnx_filename}')
 
     model_graph = draw_graph(issm_sar, input_size=[(1, 1, 128, 128), (1, 1, 128, 128)], expand_nested=True)
     model_graph.visual_graph.render(format='svg')
