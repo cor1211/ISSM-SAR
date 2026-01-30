@@ -1,0 +1,44 @@
+ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/exp_20251125-142411
+device: cuda
+
+normalize:
+  mean: 0.5
+  std: 0.5
+
+input:
+  s1t1_path:
+  s1t2_path:
+
+output:
+  s1sr_path:
+  save_path:
+
+# Model architecture config
+model:
+  num_ifs: 3
+  use_bn: False
+  use_gn: True
+
+  pfe:
+    in_channels: 1
+    out_channels: 80
+  
+  hfe:
+    in_c: 80
+    out_c: 80
+    kernel_size: 6
+    padding: 2
+    stride: 2
+    num_blocks: 4
+  
+  rec:
+    in_c: 80
+    out_c: 1
+
+  ifs:
+    in_c: 80
+    out_c: 80
+    num_groups: 3
+    kernel_size: 6
+    padding: 2
+    stride: 2

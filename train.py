@@ -1,7 +1,6 @@
 import torch
-from src import ISSM_SAR, SarDataset
+from src import ISSM_SAR, MultiTempSARDataset
 from torch.utils.data import DataLoader
-from torchvision.transforms import Compose, ToTensor, Normalize
 from tqdm import tqdm
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
@@ -9,7 +8,7 @@ from datetime import datetime
 import os
 import yaml
 import argparse
-from trainer import Trainer
+from trainer_2 import Trainer
 from pathlib import Path
 import sys
 import random
@@ -46,6 +45,12 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+def worker_init_fn(worker_id):
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
+
+
 if __name__ =='__main__':
     #------------Argument parser------------
     parser = argparse.ArgumentParser(description='Train ISSM-SAR Model')
@@ -75,7 +80,7 @@ if __name__ =='__main__':
 
     #-----------Load checkpoint-----------
     if ckpt_path:
-        ckpt_path = Path(args.checkpoint_path)
+        ckpt_path = Path(ckpt_path)
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f'Checkpoint path {ckpt_path} not found. End!')
         
@@ -94,19 +99,11 @@ if __name__ =='__main__':
     print(f"TensorBoard logs will be saved to: {log_dir}")
 
 
-    #-----------Transform------------
-    transform = Compose(transforms = [
-        ToTensor(),
-        Normalize(mean = [data_cfg['mean']],
-                std=[data_cfg['std']])
-    ])
-
-
     #-----------Dataset & Dataloader-----------
         
         #-----------Dataset------------
-    train_set= SarDataset(root = data_cfg['root'], train=True, transform=transform, config=data_cfg)
-    valid_set= SarDataset(root = data_cfg['root'], train=False, transform=transform, config=data_cfg)
+    train_set = MultiTempSARDataset(root_dir=data_cfg['root'], phase='train', transform=True)
+    valid_set = MultiTempSARDataset(root_dir=data_cfg['root'], phase='val', transform=False)
 
 
         #-----------Dataloader---------
@@ -115,7 +112,8 @@ if __name__ =='__main__':
         batch_size=data_cfg['train_batch_size'],
         shuffle=True,
         num_workers=data_cfg['num_workers'],
-        drop_last=True
+        drop_last=True,
+        worker_init_fn=worker_init_fn
     )
 
     valid_loader = DataLoader(
@@ -123,7 +121,8 @@ if __name__ =='__main__':
         batch_size=data_cfg['test_batch_size'],
         shuffle=False,
         num_workers=data_cfg['num_workers'],
-        drop_last=True
+        drop_last=False,
+        worker_init_fn=worker_init_fn
     )
 
 
@@ -133,7 +132,7 @@ if __name__ =='__main__':
 
 
     #-------------Training--------------
-    trainer = Trainer(model, optimizer, train_loader, valid_loader, device, config, writer, run_name, ckpt_path, args.kaggle)
+    trainer = Trainer(model, optimizer, train_loader, valid_loader, device, config, writer, run_name, ckpt_path)
     trainer.run()
 
 

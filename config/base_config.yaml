@@ -1,21 +1,34 @@
+
+
 # Dataset config
 data:
-  root: '/mnt/data1tb/vinh/ISSM-SAR/dataset'
-  train_batch_size: 2
-  test_batch_size: 2
+  root: '/mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited'
+  train_batch_size: 6
+  test_batch_size: 6
   train_folder_name: 'train'
   valid_folder_name: 'valid'
   num_workers: 2
+  # mean: 0.5
+  # std: 0.5
+
 
 # Training config
 train:
-  epochs: 50
+  total_epochs: 50
   lr: 0.00001
-  val_step: 300
+  val_step: 100
   theta_1: 1.0
   theta_2: 1.0
   theta_3: 3.0
-  component_loss: True
+  component_losses: True
+  resume_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/exp_20260130-140512/last.pth
+  kaggle: 0
+  device: cuda
+  seed: 42
+  betas: [0.5, 0.999]
+  use_amp: True 
+  grad_clip: 1.0
+
 
 # Model architecture config
 model:
@@ -25,23 +38,23 @@ model:
 
   pfe:
     in_channels: 1
-    out_channels: 80
+    out_channels: 30  
   
   hfe:
-    in_c: 80
-    out_c: 80
+    in_c: 30
+    out_c: 30
     kernel_size: 6
     padding: 2
     stride: 2
     num_blocks: 4
   
   rec:
-    in_c: 80
+    in_c: 30
     out_c: 1
 
   ifs:
-    in_c: 80
-    out_c: 80
+    in_c: 30
+    out_c: 30
     num_groups: 3
     kernel_size: 6
     padding: 2
