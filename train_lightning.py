@@ -100,7 +100,11 @@ def main():
 
     # Determine strategy based on devices
     if args.devices > 1:
-        strategy = 'ddp'
+        from pytorch_lightning.strategies import DDPStrategy
+        strategy = DDPStrategy(
+            find_unused_parameters=False,  # Set True if model has unused params
+            static_graph=True,  # Optimization for static computation graphs
+        )
         print(f"Using DDP strategy with {args.devices} GPUs")
     else:
         strategy = 'auto'
