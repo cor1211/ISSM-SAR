@@ -1,15 +1,60 @@
 # Python cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.so
 
 # Data
 dataset/
 dataset.zip
+dataset (1)/
 
-# Runs / Logs
+# Runs / Logs / Checkpoints
 runs/
+checkpoints/
+lightning_logs/
+*.ckpt
+*.pth
 
-# Môi trường (Tùy chọn, nhưng nên thêm)
+# Large files
+*.zip
+*.tar.gz
+*.npy
+*.npz
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+!*.ipynb
+
+# Environment
 environment.yml
 no_prefix_environment.yml
 conda_syntax
+.env
+venv/
+.venv/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Visualization outputs
+*.svg
+*.png
+*.gv
+graph
+model.gv
+
+# OS files
+.DS_Store
+Thumbs.db
