@@ -92,10 +92,10 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.accumulated_ratio += total_ratio_loss.item()
         self.accumulate_count += 1
         
-        # Log every step (sync_dist=True for multi-GPU)
-        self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
-        self.log('train/l1_loss', total_l1_loss, on_step=True, on_epoch=False, sync_dist=True)
-        self.log('train/ratio_loss', total_ratio_loss, on_step=True, on_epoch=False, sync_dist=True)
+        # Log every step (sync_dist=False for on_step to avoid deadlock)
+        self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=False)
+        self.log('train/l1_loss', total_l1_loss, on_step=True, on_epoch=False, sync_dist=False)
+        self.log('train/ratio_loss', total_ratio_loss, on_step=True, on_epoch=False, sync_dist=False)
         
         # Log average every val_step
         if self.global_step > 0 and self.global_step % self.val_step == 0:
@@ -136,37 +136,53 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Log L1
         self.log('val/l1_loss', l1_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         
-        # Log images (only from rank 0, first batch)
-        if batch_idx == 0 and self.trainer.is_global_zero:
-            n_imgs = min(8, sr_fusion.size(0))
-            self.logger.experiment.add_image(
-                'val/SR', make_grid(sr_denorm[:n_imgs], nrow=4), self.global_step
-            )
-            self.logger.experiment.add_image(
-                'val/HR', make_grid(hr_denorm[:n_imgs], nrow=4), self.global_step
-            )
-            self.logger.experiment.add_image(
-                'val/S1T1', make_grid(denorm(s1t1)[:n_imgs], nrow=4), self.global_step
-            )
-            self.logger.experiment.add_image(
-                'val/S1T2', make_grid(denorm(s1t2)[:n_imgs], nrow=4), self.global_step
-            )
+        # Log images (only from rank 0, first batch, skip during sanity check)
+        # Check: not sanity checking, is rank 0, logger exists, first batch
+        is_sanity_check = self.trainer.sanity_checking
+        should_log_images = (
+            batch_idx == 0 
+            and self.trainer.is_global_zero 
+            and self.logger is not None
+            and not is_sanity_check
+        )
+        
+        if should_log_images:
+            try:
+                n_imgs = min(8, sr_fusion.size(0))
+                self.logger.experiment.add_image(
+                    'val/SR', make_grid(sr_denorm[:n_imgs], nrow=4), self.global_step
+                )
+                self.logger.experiment.add_image(
+                    'val/HR', make_grid(hr_denorm[:n_imgs], nrow=4), self.global_step
+                )
+                self.logger.experiment.add_image(
+                    'val/S1T1', make_grid(denorm(s1t1)[:n_imgs], nrow=4), self.global_step
+                )
+                self.logger.experiment.add_image(
+                    'val/S1T2', make_grid(denorm(s1t2)[:n_imgs], nrow=4), self.global_step
+                )
+            except Exception as e:
+                # Silently skip if logging fails (e.g., during distributed edge cases)
+                pass
         
         return {'l1_loss': l1_loss}
 
     def on_validation_epoch_end(self):
-        # Compute final metrics
+        # Compute final metrics (torchmetrics handles sync automatically)
         psnr = self.val_psnr.compute()
         ssim = self.val_ssim.compute()
         
-        # Log metrics
+        # Log metrics (sync_dist=True for validation epoch metrics)
         self.log('val/psnr', psnr, prog_bar=True, sync_dist=True)
         self.log('val/ssim', ssim, prog_bar=True, sync_dist=True)
         
-        # Track best SSIM (only on rank 0)
-        if self.trainer.is_global_zero and ssim > self.best_ssim:
-            self.best_ssim = ssim
-            self.log('val/best_ssim', self.best_ssim, sync_dist=True)
+        # Track best SSIM - compare on rank 0 only but don't use conditional logging
+        # Use rank_zero_only decorator or just track locally
+        if ssim > self.best_ssim:
+            self.best_ssim = float(ssim)
+        
+        # Log best SSIM from all ranks (only rank 0 value matters)
+        self.log('val/best_ssim', self.best_ssim, sync_dist=False, rank_zero_only=True)
         
         # Reset metrics
         self.val_psnr.reset()
