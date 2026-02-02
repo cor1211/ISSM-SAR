@@ -15,7 +15,7 @@ import random
 import numpy as np
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, RichProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 from pathlib import Path
 from datetime import datetime
@@ -94,8 +94,8 @@ def main():
         ),
         # Learning rate monitor
         LearningRateMonitor(logging_interval='step'),
-        # Rich progress bar
-        RichProgressBar()
+        # TQDM progress bar (works better in screen/tmux with DDP)
+        TQDMProgressBar(refresh_rate=10)
     ]
 
     # Determine strategy based on devices
