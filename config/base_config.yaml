@@ -3,8 +3,8 @@
 # Dataset config
 data:
   root: '/mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited'
-  train_batch_size: 4
-  test_batch_size: 4
+  train_batch_size: 6
+  test_batch_size: 6
   train_folder_name: 'train'
   valid_folder_name: 'valid'
   num_workers: 2
@@ -21,7 +21,7 @@ train:
   theta_2: 1.0
   theta_3: 3.0
   component_losses: True
-  resume_path: 
+  resume_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260202-093521/last.ckpt
   kaggle: 0
   device: cuda
   seed: 42

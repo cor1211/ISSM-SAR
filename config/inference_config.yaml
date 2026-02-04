@@ -1,17 +1,18 @@
-ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/exp_20251125-142411
+ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260202-172114/best-epoch=09-step=043411.ckpt
 device: cuda
+limit: 100 # Optional: Limit number of images to infer (e.g., 100). Set null for all.
 
 normalize:
   mean: 0.5
   std: 0.5
 
 input:
-  s1t1_path:
-  s1t2_path:
+  s1t1_path: /mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val/S1T1
+  s1t2_path: /mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val/S1T2
 
 output:
   s1sr_path:
-  save_path:
+  save_path: test_results
 
 # Model architecture config
 model:

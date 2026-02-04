@@ -8,7 +8,7 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 from torchvision.utils import make_grid
 
 from src.model import ISSM_SAR
-from src.loss import lratio_loss
+from src.loss import lratio_loss, gradient_loss
 
 
 def denorm(x, mean=0.5, std=0.5):
@@ -48,6 +48,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Accumulate losses for logging every val_step
         self.accumulated_l1 = 0.0
         self.accumulated_ratio = 0.0
+        self.accumulated_grad = 0.0
         self.accumulate_count = 0
 
     def forward(self, s1t1, s1t2):
@@ -65,6 +66,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Compute losses (use same dtype as model for AMP compatibility)
         total_ratio_loss = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
         total_l1_loss = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
+        total_grad_loss = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
         
         # Component losses: calculate for intermediate SR outputs
         if self.component_losses:
@@ -79,8 +81,10 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             total_ratio_loss = total_ratio_loss + lratio_loss(s1sr_up[-1], hr) + lratio_loss(s1sr_down[-1], hr)
         if self.theta_2 != 0.0:
             total_l1_loss = total_l1_loss + self.criterion_L1(s1sr_up[-1], hr) + self.criterion_L1(s1sr_down[-1], hr)
-        
-        loss = self.theta_1 * total_ratio_loss + self.theta_2 * total_l1_loss
+        if self.theta_3 != 0.0:
+            total_grad_loss = total_grad_loss + gradient_loss(s1sr_up[-1], hr) + gradient_loss(s1sr_down[-1], hr)
+
+        loss = self.theta_1 * total_ratio_loss + self.theta_2 * total_l1_loss + self.theta_3 * total_grad_loss
         
         # Check for NaN
         if torch.isnan(loss) or torch.isinf(loss):
@@ -90,22 +94,27 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Accumulate for periodic logging
         self.accumulated_l1 += total_l1_loss.item()
         self.accumulated_ratio += total_ratio_loss.item()
+        self.accumulated_grad += total_grad_loss.item()
         self.accumulate_count += 1
         
         # Log every step (sync_dist=False for on_step to avoid deadlock)
         self.log('train/loss', loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=False)
         self.log('train/l1_loss', total_l1_loss, on_step=True, on_epoch=False, sync_dist=False)
         self.log('train/ratio_loss', total_ratio_loss, on_step=True, on_epoch=False, sync_dist=False)
+        self.log('train/grad_loss', total_grad_loss, on_step=True, on_epoch=False, sync_dist=False)
         
         # Log average every val_step
         if self.global_step > 0 and self.global_step % self.val_step == 0:
             avg_l1 = self.accumulated_l1 / max(self.accumulate_count, 1)
             avg_ratio = self.accumulated_ratio / max(self.accumulate_count, 1)
+            avg_grad = self.accumulated_grad / max(self.accumulate_count, 1)
             self.log('train/avg_l1_loss', avg_l1, on_step=True, on_epoch=False)
             self.log('train/avg_ratio_loss', avg_ratio, on_step=True, on_epoch=False)
+            self.log('train/avg_grad_loss', avg_grad, on_step=True, on_epoch=False)
             # Reset
             self.accumulated_l1 = 0.0
             self.accumulated_ratio = 0.0
+            self.accumulated_grad = 0.0
             self.accumulate_count = 0
         
         return loss
