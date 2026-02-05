@@ -104,7 +104,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         
         # Check for NaN
         if torch.isnan(loss) or torch.isinf(loss):
-            self.log('train/nan_detected', 1.0, prog_bar=True)
+            self.log('Debug/Train/nan_detected', 1.0, prog_bar=True)
             return None  # Skip this batch
         
         # Accumulate for periodic logging

@@ -86,7 +86,7 @@ def main():
         ModelCheckpoint(
             dirpath=checkpoint_dir,
             filename='best-{epoch:02d}-{step:06d}',
-            monitor='val/ssim',
+            monitor='Metrics/Val/SSIM',
             mode='max',
             save_top_k=1,
             save_last=True,
