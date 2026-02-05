@@ -81,7 +81,13 @@ class ISSM_SAR_Lightning(pl.LightningModule):
                     total_ratio_loss = total_ratio_loss + lratio_loss(s1sr_up[idx], hr) + lratio_loss(s1sr_down[idx], hr)
                 if self.theta_2 != 0:
                     total_l1_loss = total_l1_loss + self.criterion_L1(s1sr_up[idx], hr) + self.criterion_L1(s1sr_down[idx], hr)
-        
+                if self.theta_3 != 0:
+                    total_grad_loss = total_grad_loss + gradient_loss(s1sr_up[idx], hr) + gradient_loss(s1sr_down[idx], hr)
+                if self.theta_4 != 0:
+                    total_freq_loss = total_freq_loss + frequency_domain_loss(s1sr_up[idx], hr) + frequency_domain_loss(s1sr_down[idx], hr)
+                if self.theta_5 != 0:
+                    total_speckle_loss = total_speckle_loss + speckle_aware_loss(s1sr_up[idx], hr) + speckle_aware_loss(s1sr_down[idx], hr)
+
         # Final output loss
         if self.theta_1 != 0.0:
             total_ratio_loss = total_ratio_loss + lratio_loss(s1sr_up[-1], hr) + lratio_loss(s1sr_down[-1], hr)
