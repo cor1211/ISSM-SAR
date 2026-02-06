@@ -102,8 +102,8 @@ def main():
     if args.devices > 1:
         from pytorch_lightning.strategies import DDPStrategy
         strategy = DDPStrategy(
-            find_unused_parameters=False,  # Set True if model has unused params
-            static_graph=True,  # Optimization for static computation graphs
+            find_unused_parameters=True,   # Required for GAN when D may not be trained
+            static_graph=False,            # Must be False for manual optimization
         )
         print(f"Using DDP strategy with {args.devices} GPUs")
     else:
@@ -120,7 +120,7 @@ def main():
         # Training config
         max_epochs=train_cfg['total_epochs'],
         precision='16-mixed' if train_cfg.get('use_amp', True) else 32,
-        gradient_clip_val=train_cfg.get('grad_clip', 0.0),
+        # Note: gradient_clip_val is handled manually in training_step for GAN
         
         # Validation - val_check_interval as int means every N batches
         val_check_interval=int(train_cfg['val_step']),

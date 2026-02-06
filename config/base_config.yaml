@@ -20,8 +20,9 @@ train:
   theta_1: 1.0      # Ratio Loss weight
   theta_2: 1.0      # L1 Loss weight
   theta_3: 3.0      # Gradient Loss weight
-  theta_4: 0.5      # Frequency Domain Loss weight (NEW - anti-oversmoothing)
-  theta_5: 0.2      # Speckle-Aware Loss weight (NEW - SAR-specific)
+  theta_4: 0.5      # Frequency Domain Loss weight (anti-oversmoothing)
+  theta_5: 0.2      # Speckle-Aware Loss weight (SAR-specific)
+  theta_6: 0.0      # Adversarial Loss weight (GAN) - set via schedule
   component_losses: True
   resume_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260202-093521/last.ckpt
   kaggle: 0
@@ -30,6 +31,22 @@ train:
   betas: [0.5, 0.999]
   use_amp: True 
   grad_clip: 1.0
+
+# GAN training config
+gan:
+  enabled: True                 # Enable/disable adversarial training
+  loss_type: 'ragan'            # 'ragan' or 'lsgan'
+  warmup_epochs: 0              # No warmup - GAN from start
+  ramp_epochs: 5                # Epochs to ramp up adv weight (0→max)
+  max_weight: 0.01              # Maximum adversarial weight (start smaller for stability)
+  label_smoothing: 0.1          # Light smoothing for stability
+  d_lr_mult: 4.0                # D learns faster than G
+
+# Discriminator config
+discriminator:
+  ndf: 64                       # Base feature channels
+  use_spectral_norm: True       # Spectral normalization for stability
+  in_channels: 1                # SAR single channel
 
 # Lightning config (for train_lightning.py)
 lightning:

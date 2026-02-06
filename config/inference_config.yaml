@@ -1,4 +1,4 @@
-ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260202-172114/best-epoch=09-step=043411.ckpt
+ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260205-165352/best-epoch=02-step=025518.ckpt
 device: cuda
 limit: 100 # Optional: Limit number of images to infer (e.g., 100). Set null for all.
 
@@ -12,7 +12,7 @@ input:
 
 output:
   s1sr_path:
-  save_path: test_results
+  save_path: test_results_2
 
 # Model architecture config
 model:
