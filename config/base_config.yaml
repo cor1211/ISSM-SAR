@@ -37,8 +37,8 @@ gan:
   enabled: True                 # Enable/disable adversarial training
   loss_type: 'ragan'            # 'ragan' or 'lsgan'
   warmup_epochs: 0              # No warmup - GAN from start
-  ramp_epochs: 5                # Epochs to ramp up adv weight (0→max)
-  max_weight: 0.01              # Maximum adversarial weight (start smaller for stability)
+  ramp_epochs: 3                # Faster ramp up (0→max in 3 epochs)
+  max_weight: 0.05              # Increased adversarial weight (5x stronger)
   label_smoothing: 0.1          # Light smoothing for stability
   d_lr_mult: 4.0                # D learns faster than G
 
