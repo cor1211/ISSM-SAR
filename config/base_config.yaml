@@ -21,10 +21,11 @@ train:
   theta_2: 1.0      # L1 Loss weight
   theta_3: 3.0      # Gradient Loss weight
   theta_4: 0.5      # Frequency Domain Loss weight (anti-oversmoothing)
-  theta_5: 0.0      # Speckle-Aware Loss weight (SAR-specific) - Disabled
+  theta_5: 0.2      # Speckle-Aware Loss weight (SAR-specific)
   theta_6: 0.0      # Adversarial Loss weight (GAN) - set via schedule
+  theta_7: 0.1      # Perceptual Loss weight (VGG19)
   component_losses: True
-  resume_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260202-093521/last.ckpt
+  resume_path: 
   kaggle: 0
   device: cuda
   seed: 42
@@ -47,6 +48,11 @@ discriminator:
   ndf: 64                       # Base feature channels
   use_spectral_norm: True       # Spectral normalization for stability
   in_channels: 1                # SAR single channel
+
+# Perceptual Loss config
+perceptual:
+  layer_weights: {'34': 1.0}    # VGG19 conv5_4 (index 34)
+  use_input_norm: True          # Normalize with ImageNet stats
 
 # Lightning config (for train_lightning.py)
 lightning:

@@ -7,3 +7,4 @@ from .lightning_module import ISSM_SAR_Lightning
 from .data_module import SARDataModule
 from .discriminator import SARPatchDiscriminator, MultiScaleDiscriminator
 from .gan_losses import discriminator_loss_ragan, generator_loss_ragan, get_adversarial_weight
+from .perceptual_loss import VGGPerceptualLoss

@@ -15,6 +15,7 @@ from src.gan_losses import (
     discriminator_loss_lsgan, generator_loss_lsgan,
     get_adversarial_weight
 )
+from src.perceptual_loss import VGGPerceptualLoss
 
 
 def denorm(x, mean=0.5, std=0.5):
@@ -36,7 +37,8 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.cfg_gan = config.get('gan', {})
         self.cfg_disc = config.get('discriminator', {})
         self.cfg_lightning = config.get('lightning', {})
-
+        self.cfg_percep = config.get('perceptual', {})
+        
         # Validation settings
         self.limit_val_batches = self.cfg_lightning.get('limit_val_batches')
         
@@ -55,6 +57,8 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.theta_3 = self.cfg_train.get('theta_3', 0.0)  # Gradient loss
         self.theta_4 = self.cfg_train.get('theta_4', 0.0)  # Frequency domain loss
         self.theta_5 = self.cfg_train.get('theta_5', 0.0)  # Speckle-aware loss
+        self.theta_6 = self.cfg_train.get('theta_6', 0.0)  # Adversarial loss (via schedule)
+        self.theta_7 = self.cfg_train.get('theta_7', 0.0)  # Perceptual loss
         self.component_losses = self.cfg_train['component_losses']
         self.val_step = self.cfg_train['val_step']
         
@@ -70,6 +74,15 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             )
         else:
             self.discriminator = None
+            
+        # Perceptual Loss
+        if self.theta_7 > 0:
+            self.perceptual_loss = VGGPerceptualLoss(
+                layer_weights=self.cfg_percep.get('layer_weights', {'34': 1.0}),
+                use_input_norm=self.cfg_percep.get('use_input_norm', True)
+            )
+        else:
+            self.perceptual_loss = None
         
         # Loss function
         self.criterion_L1 = nn.L1Loss()
@@ -89,6 +102,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.accumulated_speckle = 0.0
         self.accumulated_adv = 0.0
         self.accumulated_d_loss = 0.0
+        self.accumulated_percep = 0.0
         self.accumulate_count = 0
 
     def forward(self, s1t1, s1t2):
@@ -205,6 +219,11 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             else:  # lsgan
                 g_adv_loss = generator_loss_lsgan(self.discriminator, sr_fusion)
         
+        # Compute perceptual loss
+        l_percep = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
+        if self.theta_7 > 0 and self.perceptual_loss is not None:
+            l_percep = self.perceptual_loss(sr_fusion, hr)
+        
         # Total generator loss
         g_total_loss = (
             self.theta_1 * recon_losses['ratio'] +
@@ -212,6 +231,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             self.theta_3 * recon_losses['grad'] +
             self.theta_4 * recon_losses['freq'] +
             self.theta_5 * recon_losses['speckle'] +
+            self.theta_7 * l_percep +
             adv_weight * g_adv_loss
         )
         
@@ -240,6 +260,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.accumulated_grad += recon_losses['grad'].item()
         self.accumulated_freq += recon_losses['freq'].item()
         self.accumulated_speckle += recon_losses['speckle'].item()
+        self.accumulated_percep += l_percep.item()
         self.accumulated_adv += g_adv_loss.item()
         self.accumulated_d_loss += d_loss.item()
         self.accumulate_count += 1
@@ -251,6 +272,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.log('Loss/Train/gradient', recon_losses['grad'], on_step=True, on_epoch=False, sync_dist=False)
         self.log('Loss/Train/frequency', recon_losses['freq'], on_step=True, on_epoch=False, sync_dist=False)
         self.log('Loss/Train/speckle', recon_losses['speckle'], on_step=True, on_epoch=False, sync_dist=False)
+        self.log('Loss/Train/perceptual', l_percep, on_step=True, on_epoch=False, sync_dist=False)
         
         if self.gan_enabled:
             self.log('Loss/Train/G_adv', g_adv_loss, on_step=True, on_epoch=False, sync_dist=False)
@@ -265,6 +287,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             self.log('Debug/Train/avg_gradient', self.accumulated_grad / n, on_step=True, on_epoch=False)
             self.log('Debug/Train/avg_frequency', self.accumulated_freq / n, on_step=True, on_epoch=False)
             self.log('Debug/Train/avg_speckle', self.accumulated_speckle / n, on_step=True, on_epoch=False)
+            self.log('Debug/Train/avg_perceptual', self.accumulated_percep / n, on_step=True, on_epoch=False)
             if self.gan_enabled:
                 self.log('Debug/Train/avg_G_adv', self.accumulated_adv / n, on_step=True, on_epoch=False)
                 self.log('Debug/Train/avg_D', self.accumulated_d_loss / n, on_step=True, on_epoch=False)
@@ -275,6 +298,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             self.accumulated_grad = 0.0
             self.accumulated_freq = 0.0
             self.accumulated_speckle = 0.0
+            self.accumulated_percep = 0.0
             self.accumulated_adv = 0.0
             self.accumulated_d_loss = 0.0
             self.accumulate_count = 0
