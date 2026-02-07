@@ -222,7 +222,8 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Compute perceptual loss
         l_percep = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
         if self.theta_7 > 0 and self.perceptual_loss is not None:
-            l_percep = self.perceptual_loss(sr_fusion, hr)
+            # VGG expects [0, 1] input for its internal normalization
+            l_percep = self.perceptual_loss(denorm(sr_fusion), denorm(hr))
         
         # Total generator loss
         g_total_loss = (
