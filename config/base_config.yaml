@@ -21,7 +21,7 @@ train:
   theta_2: 1.0      # L1 Loss weight
   theta_3: 3.0      # Gradient Loss weight
   theta_4: 0.5      # Frequency Domain Loss weight (anti-oversmoothing)
-  theta_5: 0.2      # Speckle-Aware Loss weight (SAR-specific)
+  theta_5: 0.0      # Speckle-Aware Loss weight (SAR-specific) - Disabled
   theta_6: 0.0      # Adversarial Loss weight (GAN) - set via schedule
   component_losses: True
   resume_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260202-093521/last.ckpt
@@ -37,8 +37,8 @@ gan:
   enabled: True                 # Enable/disable adversarial training
   loss_type: 'ragan'            # 'ragan' or 'lsgan'
   warmup_epochs: 0              # No warmup - GAN from start
-  ramp_epochs: 3                # Faster ramp up (0→max in 3 epochs)
-  max_weight: 0.05              # Increased adversarial weight (5x stronger)
+  ramp_epochs: 5                # Epochs to ramp up adv weight (0→max)
+  max_weight: 0.1               # Increased adversarial weight to encourage detailed textures
   label_smoothing: 0.1          # Light smoothing for stability
   d_lr_mult: 4.0                # D learns faster than G
 
@@ -53,7 +53,7 @@ lightning:
   devices: 2
   strategy: "ddp"
   precision: "16-mixed"
-
+  limit_val_batches: 200        # Limit validation batches to speed up evaluation
 
 # Model architecture config
 model:

@@ -35,6 +35,10 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.cfg_model = config['model']
         self.cfg_gan = config.get('gan', {})
         self.cfg_disc = config.get('discriminator', {})
+        self.cfg_lightning = config.get('lightning', {})
+
+        # Validation settings
+        self.limit_val_batches = self.cfg_lightning.get('limit_val_batches')
         
         # GAN settings
         self.gan_enabled = self.cfg_gan.get('enabled', False)
@@ -278,6 +282,10 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         return g_total_loss
 
     def validation_step(self, batch, batch_idx):
+        # Manually limit validation batches if configured
+        if self.limit_val_batches is not None and batch_idx >= self.limit_val_batches:
+            return
+
         # Get data
         s1t1 = batch['T1']
         s1t2 = batch['T2']
