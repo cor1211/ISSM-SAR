@@ -153,6 +153,24 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             'speckle': total_speckle_loss
         }
 
+    def on_load_checkpoint(self, checkpoint):
+        """
+        Handle backward compatibility for checkpoints that don't have LPIPS weights.
+        This injects the current model's LPIPS weights into the checkpoint state_dict
+        if they are missing, preventing strict loading errors.
+        """
+        state_dict = checkpoint["state_dict"]
+        model_state_dict = self.state_dict()
+        
+        # Keys related to LPIPS
+        # torchmetrics usually prefixes with val_lpips.net...
+        lpips_keys = [k for k in model_state_dict.keys() if "val_lpips" in k]
+        
+        for k in lpips_keys:
+            if k not in state_dict:
+                # Inject current initialized value (pretrained)
+                state_dict[k] = model_state_dict[k]
+        
     def training_step(self, batch, batch_idx):
         # Get optimizers
         if self.gan_enabled:
