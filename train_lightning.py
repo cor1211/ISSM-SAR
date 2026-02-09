@@ -99,7 +99,7 @@ def main():
         # Save best model by SSIM
         ModelCheckpoint(
             dirpath=checkpoint_dir,
-            filename='best-{epoch:02d}-{step:06d}',
+            filename='best-ssim-{epoch:02d}-{step:06d}-val_ssim={Metrics/Val/SSIM:.4f}',
             monitor='Metrics/Val/SSIM',
             mode='max',
             save_top_k=1,
@@ -109,11 +109,21 @@ def main():
         # Save best model by LPIPS (lower is better)
         ModelCheckpoint(
             dirpath=checkpoint_dir,
-            filename='best_lpips-{epoch:02d}-{step:06d}',
+            filename='best-lpips-{epoch:02d}-{step:06d}-val_lpips={Metrics/Val/LPIPS:.4f}',
             monitor='Metrics/Val/LPIPS',
             mode='min',
             save_top_k=1,
             save_last=False,
+            verbose=True
+        ),
+        # Save latest model every epoch regardless of metrics
+        ModelCheckpoint(
+            dirpath=checkpoint_dir,
+            filename='last-{epoch:02d}-{step:06d}',
+            every_n_epochs=1,
+            save_top_k=1,     # Keep only the latest 1
+            monitor=None,     # Save regardless of metrics
+            save_last=True,   # Update 'last.ckpt'
             verbose=True
         ),
         # Learning rate monitor

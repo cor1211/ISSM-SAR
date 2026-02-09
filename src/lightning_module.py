@@ -370,7 +370,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Log images
         is_sanity_check = self.trainer.sanity_checking
         should_log_images = (
-            batch_idx == 0 
+            batch_idx < 3  # Log first 3 batches to see variety
             and self.trainer.is_global_zero 
             and self.logger is not None
             and not is_sanity_check
@@ -379,17 +379,19 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         if should_log_images:
             try:
                 n_imgs = min(8, sr_fusion.size(0))
+                tag_suffix = f"_batch{batch_idx}" if batch_idx > 0 else ""
+                
                 self.logger.experiment.add_image(
-                    'Image/Val/SR', make_grid(sr_denorm[:n_imgs], nrow=4), self.global_step
+                    f'Image/Val/SR{tag_suffix}', make_grid(sr_denorm[:n_imgs], nrow=4), self.global_step
                 )
                 self.logger.experiment.add_image(
-                    'Image/Val/HR', make_grid(hr_denorm[:n_imgs], nrow=4), self.global_step
+                    f'Image/Val/HR{tag_suffix}', make_grid(hr_denorm[:n_imgs], nrow=4), self.global_step
                 )
                 self.logger.experiment.add_image(
-                    'Image/Val/S1T1', make_grid(denorm(s1t1)[:n_imgs], nrow=4), self.global_step
+                    f'Image/Val/S1T1{tag_suffix}', make_grid(denorm(s1t1)[:n_imgs], nrow=4), self.global_step
                 )
                 self.logger.experiment.add_image(
-                    'Image/Val/S1T2', make_grid(denorm(s1t2)[:n_imgs], nrow=4), self.global_step
+                    f'Image/Val/S1T2{tag_suffix}', make_grid(denorm(s1t2)[:n_imgs], nrow=4), self.global_step
                 )
             except Exception:
                 pass
