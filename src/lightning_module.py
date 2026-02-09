@@ -91,7 +91,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Metrics
         self.val_psnr = PeakSignalNoiseRatio(data_range=1.0)
         self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
-        self.val_lpips = LearnedPerceptualImagePatchSimilarity(net_type='alex')
+        self.val_lpips = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True)
         
         # Best metric tracking
         self.best_ssim = 0.0
@@ -359,10 +359,11 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.val_psnr.update(sr_denorm, hr_denorm)
         self.val_ssim.update(sr_denorm, hr_denorm)
         
-        # LPIPS expects input in [0, 1] but normalized differently internally. 
-        # Ideally it expects [-1, 1] if not normalized=True, but torchmetrics handles [0, 1] 
-        # if normalize=True (default). We pass [0, 1] tensors.
-        self.val_lpips.update(sr_denorm, hr_denorm)
+        # LPIPS expects 3-channel input. Repeat 1-channel SAR to 3 channels.
+        sr_lpips = sr_denorm.repeat(1, 3, 1, 1)
+        hr_lpips = hr_denorm.repeat(1, 3, 1, 1)
+        
+        self.val_lpips.update(sr_lpips, hr_lpips)
         
         # Log L1
         self.log('Loss/Val/l1', l1_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
