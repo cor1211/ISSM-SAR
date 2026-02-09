@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchvision.utils import make_grid
 
 from src.model import ISSM_SAR
@@ -90,9 +91,11 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Metrics
         self.val_psnr = PeakSignalNoiseRatio(data_range=1.0)
         self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+        self.val_lpips = LearnedPerceptualImagePatchSimilarity(net_type='alex')
         
         # Best metric tracking
         self.best_ssim = 0.0
+        self.best_lpips = float('inf')
         
         # Accumulate losses for logging
         self.accumulated_l1 = 0.0
@@ -225,10 +228,14 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             # VGG expects [0, 1] input for its internal normalization
             l_percep = self.perceptual_loss(denorm(sr_fusion), denorm(hr))
         
+        # Add explicit L1 loss on the final fused output
+        # This ensures the actual inference output is optimized for reconstruction
+        l1_fusion = self.criterion_L1(sr_fusion, hr)
+        
         # Total generator loss
         g_total_loss = (
             self.theta_1 * recon_losses['ratio'] +
-            self.theta_2 * recon_losses['l1'] +
+            self.theta_2 * (recon_losses['l1'] + l1_fusion) +  # Add fusion L1 to branch L1s
             self.theta_3 * recon_losses['grad'] +
             self.theta_4 * recon_losses['freq'] +
             self.theta_5 * recon_losses['speckle'] +
@@ -330,8 +337,14 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         hr_denorm = denorm(hr)
         
         # Update metrics
+        # Update metrics
         self.val_psnr.update(sr_denorm, hr_denorm)
         self.val_ssim.update(sr_denorm, hr_denorm)
+        
+        # LPIPS expects input in [0, 1] but normalized differently internally. 
+        # Ideally it expects [-1, 1] if not normalized=True, but torchmetrics handles [0, 1] 
+        # if normalize=True (default). We pass [0, 1] tensors.
+        self.val_lpips.update(sr_denorm, hr_denorm)
         
         # Log L1
         self.log('Loss/Val/l1', l1_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -371,18 +384,29 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         ssim = self.val_ssim.compute()
         
         # Log metrics
+        # Log metrics
         self.log('Metrics/Val/PSNR', psnr, prog_bar=True, sync_dist=True)
         self.log('Metrics/Val/SSIM', ssim, prog_bar=True, sync_dist=True)
+        
+        # Compute LPIPS
+        lpips = self.val_lpips.compute()
+        self.log('Metrics/Val/LPIPS', lpips, prog_bar=True, sync_dist=True)
         
         # Track best SSIM
         if ssim > self.best_ssim:
             self.best_ssim = float(ssim)
+            
+        # Track best LPIPS (lower is better)
+        if lpips < self.best_lpips:
+            self.best_lpips = float(lpips)
         
         self.log('Metrics/Val/best_SSIM', self.best_ssim, sync_dist=False, rank_zero_only=True)
+        self.log('Metrics/Val/best_LPIPS', self.best_lpips, sync_dist=False, rank_zero_only=True)
         
         # Reset metrics
         self.val_psnr.reset()
         self.val_ssim.reset()
+        self.val_lpips.reset()
 
     def configure_optimizers(self):
         # Generator optimizer

@@ -17,14 +17,14 @@ train:
   total_epochs: 50
   lr: 0.00001
   val_step: 100
-  theta_1: 1.0      # Ratio Loss weight
+  theta_1: 0.0      # Ratio Loss - Disabled
   theta_2: 1.0      # L1 Loss weight
-  theta_3: 3.0      # Gradient Loss weight
-  theta_4: 0.5      # Frequency Domain Loss weight (anti-oversmoothing)
-  theta_5: 0.2      # Speckle-Aware Loss weight (SAR-specific)
-  theta_6: 0.0      # Adversarial Loss weight (GAN) - set via schedule
-  theta_7: 0.1      # Perceptual Loss weight (VGG19)
-  component_losses: True
+  theta_3: 0.0      # Gradient Loss - Disabled
+  theta_4: 0.0      # Frequency Domain Loss - Disabled
+  theta_5: 0.0      # Speckle-Aware Loss - Disabled
+  theta_6: 0.0      # Adversarial Loss (GAN) - set via schedule below
+  theta_7: 1.0      # Perceptual Loss weight (increased for relevance)
+  component_losses: False # Disable intermediate losses for speed
   resume_path: 
   kaggle: 0
   device: cuda
@@ -37,11 +37,11 @@ train:
 gan:
   enabled: True                 # Enable/disable adversarial training
   loss_type: 'ragan'            # 'ragan' or 'lsgan'
-  warmup_epochs: 0              # No warmup - GAN from start
-  ramp_epochs: 5                # Epochs to ramp up adv weight (0→max)
-  max_weight: 0.1               # Increased adversarial weight to encourage detailed textures
+  warmup_epochs: 0              # No warmup
+  ramp_epochs: 0                # No ramp-up - immediate effect
+  max_weight: 0.1               # Strong adversarial weight (0.1)
   label_smoothing: 0.1          # Light smoothing for stability
-  d_lr_mult: 4.0                # D learns faster than G
+  d_lr_mult: 1.0                # Equal LR for stability at high Adv weight
 
 # Discriminator config
 discriminator:
@@ -51,7 +51,7 @@ discriminator:
 
 # Perceptual Loss config
 perceptual:
-  layer_weights: {'34': 1.0}    # VGG19 conv5_4 (index 34)
+  layer_weights: {'26': 1.0}    # VGG19 conv4_4 (index 26) - better for texture than conv5_4
   use_input_norm: True          # Normalize with ImageNet stats
 
 # Lightning config (for train_lightning.py)

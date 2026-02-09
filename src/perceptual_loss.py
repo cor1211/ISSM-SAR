@@ -36,10 +36,10 @@ class VGGPerceptualLoss(nn.Module):
         
         self.use_input_norm = use_input_norm
         
-        # Default layer weights: 'conv5_4' (index 34 in VGG19 features)
-        # This is a deep layer capturing high-level texture/structure.
+        # Default layer weights: 'conv4_4' (index 26 in VGG19 features)
+        # This layer captures mid-level texture/structure, better for SAR than deeper layers.
         if layer_weights is None:
-            self.layer_weights = {'34': 1.0}
+            self.layer_weights = {'26': 1.0}
         else:
             self.layer_weights = layer_weights
             

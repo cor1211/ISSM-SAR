@@ -92,6 +92,16 @@ def main():
             save_last=True,
             verbose=True
         ),
+        # Save best model by LPIPS (lower is better)
+        ModelCheckpoint(
+            dirpath=checkpoint_dir,
+            filename='best_lpips-{epoch:02d}-{step:06d}',
+            monitor='Metrics/Val/LPIPS',
+            mode='min',
+            save_top_k=1,
+            save_last=False,
+            verbose=True
+        ),
         # Learning rate monitor
         LearningRateMonitor(logging_interval='step'),
         # Rich progress bar
