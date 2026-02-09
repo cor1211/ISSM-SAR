@@ -70,6 +70,20 @@ def main():
         resume_path = None
         print(f"Starting new run: {run_name}")
 
+    # Inspect checkpoint before loading
+    if resume_path and os.path.exists(resume_path):
+        try:
+            print(f"--- Inspecting Checkpoint: {resume_path} ---")
+            ckpt = torch.load(resume_path, map_location='cpu')
+            epoch = ckpt.get('epoch', 'N/A')
+            global_step = ckpt.get('global_step', 'N/A')
+            print(f"Checkpoint Epoch: {epoch}")
+            print(f"Checkpoint Global Step: {global_step}")
+            print(f"----------------------------------------")
+            del ckpt
+        except Exception as e:
+            print(f"Warning: Could not inspect checkpoint: {e}")
+
     # Setup logger
     logger = TensorBoardLogger(
         save_dir='runs',
