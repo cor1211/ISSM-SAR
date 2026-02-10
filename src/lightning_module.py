@@ -29,6 +29,9 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(config)
         
+        # Enable anomaly detection for debugging
+        # torch.autograd.set_detect_anomaly(True)
+        
         # Automatic optimization disabled for manual GAN training
         self.automatic_optimization = False
         
@@ -202,6 +205,9 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             min_weight=0.001  # Start with small weight immediately
         ) if self.gan_enabled else 0.0
         
+        # Safety: clamp adv_weight between 0 and max_adv_weight * 10 (just in case)
+        adv_weight = max(0.0, min(adv_weight, self.max_adv_weight * 10))
+        
         # ==================== Train Discriminator ====================
         d_loss = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
         
@@ -232,6 +238,10 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         recon_losses = self._compute_reconstruction_losses(
             s1sr_up, s1sr_down, hr, s1t1.dtype
         )
+        for k, v in recon_losses.items():
+            if torch.isnan(v) or torch.isinf(v):
+                print(f"Warning: NaN/Inf in recon_loss {k}")
+                recon_losses[k] = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
         
         # Compute adversarial loss for generator
         g_adv_loss = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
@@ -250,6 +260,14 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             # VGG expects [0, 1] input for its internal normalization
             # Returns (content_loss, style_loss)
             l_percep, l_style = self.perceptual_loss(denorm(sr_fusion), denorm(hr))
+            
+            if torch.isnan(l_percep) or torch.isinf(l_percep):
+                 print(f"Warning: NaN/Inf in l_percep")
+                 l_percep = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
+                 
+            if torch.isnan(l_style) or torch.isinf(l_style):
+                 print(f"Warning: NaN/Inf in l_style")
+                 l_style = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
         
         # Add explicit L1 loss on the final fused output
         # This ensures the actual inference output is optimized for reconstruction

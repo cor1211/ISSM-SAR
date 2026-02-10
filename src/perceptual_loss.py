@@ -109,6 +109,12 @@ class VGGPerceptualLoss(nn.Module):
         input_img = self._preprocess(input_img)
         target_img = self._preprocess(target_img)
         
+        # ensure inputs are valid
+        # if torch.isnan(input_img).any() or torch.isinf(input_img).any():
+        #      input_img = torch.nan_to_num(input_img, nan=0.0, posinf=1.0, neginf=0.0)
+        # if torch.isnan(target_img).any() or torch.isinf(target_img).any():
+        #      target_img = torch.nan_to_num(target_img, nan=0.0, posinf=1.0, neginf=0.0)
+        
         content_loss = 0.0
         style_loss = 0.0
         
@@ -139,14 +145,18 @@ class VGGPerceptualLoss(nn.Module):
             # Content Loss
             if idx_str in self.layer_weights:
                 weight = self.layer_weights[idx_str]
-                content_loss += weight * nn.functional.l1_loss(x, y)
+                loss = nn.functional.l1_loss(x, y)
+                content_loss += weight * loss
             
             # Style Loss
             if idx_str in self.style_weights:
                 weight = self.style_weights[idx_str]
+                
                 gram_x = self.gram_matrix(x)
                 gram_y = self.gram_matrix(y)
-                style_loss += weight * nn.functional.l1_loss(gram_x, gram_y)
+                
+                loss = nn.functional.l1_loss(gram_x, gram_y)
+                style_loss += weight * loss
                 
             # Stop if we went past the last needed layer
             if idx >= max_idx:
