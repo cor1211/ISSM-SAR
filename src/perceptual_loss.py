@@ -90,14 +90,17 @@ class VGGPerceptualLoss(nn.Module):
         # b=number of feature maps
         # (c,d)=dimensions of a f. map (N=c*d)
 
-        # Force float32 for Gram matrix calculation to avoid overflow in fp16/AMP
-        features = input.view(a, b, c * d).float()  # resise F_XL into \hat F_XL
+        # Force float32 for Gram matrix calculation
+        # AND disable autocast to prevent AMP from downcasting or using fp16 math
+        with torch.cuda.amp.autocast(enabled=False):
+            features = input.view(a, b, c * d).float()  # resise F_XL into \hat F_XL
+            
+            # G = F @ F.T
+            G = torch.bmm(features, features.transpose(1, 2))  # compute the gram product
 
-        G = torch.bmm(features, features.transpose(1, 2))  # compute the gram product
-
-        # we 'normalize' the values of the gram matrix
-        # by dividing by the number of element in each feature map.
-        return G.div(b * c * d)
+            # we 'normalize' the values of the gram matrix
+            # by dividing by the number of element in each feature map.
+            return G.div(b * c * d)
 
     def forward(self, input_img, target_img):
         """
