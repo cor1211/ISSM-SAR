@@ -90,7 +90,8 @@ class VGGPerceptualLoss(nn.Module):
         # b=number of feature maps
         # (c,d)=dimensions of a f. map (N=c*d)
 
-        features = input.view(a, b, c * d)  # resise F_XL into \hat F_XL
+        # Force float32 for Gram matrix calculation to avoid overflow in fp16/AMP
+        features = input.view(a, b, c * d).float()  # resise F_XL into \hat F_XL
 
         G = torch.bmm(features, features.transpose(1, 2))  # compute the gram product
 
