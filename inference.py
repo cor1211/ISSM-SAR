@@ -111,8 +111,7 @@ if __name__ == '__main__':
         for k, v in state_dict.items():
             if k.startswith('model.'):
                 new_state_dict[k[6:]] = v
-            else:
-                new_state_dict[k] = v
+            # Ignore keys that don't start with 'model.' (discriminator, metrics, etc.)
         state_dict = new_state_dict
     else:
         state_dict = checkpoint

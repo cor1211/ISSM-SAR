@@ -60,6 +60,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.theta_5 = self.cfg_train.get('theta_5', 0.0)  # Speckle-aware loss
         self.theta_6 = self.cfg_train.get('theta_6', 0.0)  # Adversarial loss (via schedule)
         self.theta_7 = self.cfg_train.get('theta_7', 0.0)  # Perceptual loss
+        self.theta_style = self.cfg_train.get('theta_style', 0.0)  # Style loss
         self.component_losses = self.cfg_train['component_losses']
         self.val_step = self.cfg_train['val_step']
         
@@ -106,6 +107,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.accumulated_adv = 0.0
         self.accumulated_d_loss = 0.0
         self.accumulated_percep = 0.0
+        self.accumulated_style = 0.0
         self.accumulate_count = 0
 
     def forward(self, s1t1, s1t2):
@@ -240,11 +242,14 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             else:  # lsgan
                 g_adv_loss = generator_loss_lsgan(self.discriminator, sr_fusion)
         
-        # Compute perceptual loss
+        # Compute perceptual and style loss
         l_percep = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
-        if self.theta_7 > 0 and self.perceptual_loss is not None:
+        l_style = torch.tensor(0.0, device=self.device, dtype=s1t1.dtype)
+        
+        if (self.theta_7 > 0 or self.theta_style > 0) and self.perceptual_loss is not None:
             # VGG expects [0, 1] input for its internal normalization
-            l_percep = self.perceptual_loss(denorm(sr_fusion), denorm(hr))
+            # Returns (content_loss, style_loss)
+            l_percep, l_style = self.perceptual_loss(denorm(sr_fusion), denorm(hr))
         
         # Add explicit L1 loss on the final fused output
         # This ensures the actual inference output is optimized for reconstruction
@@ -258,6 +263,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             self.theta_4 * recon_losses['freq'] +
             self.theta_5 * recon_losses['speckle'] +
             self.theta_7 * l_percep +
+            self.theta_style * l_style +
             adv_weight * g_adv_loss
         )
         
@@ -287,6 +293,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.accumulated_freq += recon_losses['freq'].item()
         self.accumulated_speckle += recon_losses['speckle'].item()
         self.accumulated_percep += l_percep.item()
+        self.accumulated_style += l_style.item()
         self.accumulated_adv += g_adv_loss.item()
         self.accumulated_d_loss += d_loss.item()
         self.accumulate_count += 1
@@ -299,6 +306,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.log('Loss/Train/frequency', recon_losses['freq'], on_step=True, on_epoch=False, sync_dist=False)
         self.log('Loss/Train/speckle', recon_losses['speckle'], on_step=True, on_epoch=False, sync_dist=False)
         self.log('Loss/Train/perceptual', l_percep, on_step=True, on_epoch=False, sync_dist=False)
+        self.log('Loss/Train/style', l_style, on_step=True, on_epoch=False, sync_dist=False)
         
         if self.gan_enabled:
             self.log('Loss/Train/G_adv', g_adv_loss, on_step=True, on_epoch=False, sync_dist=False)
@@ -314,6 +322,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             self.log('Debug/Train/avg_frequency', self.accumulated_freq / n, on_step=True, on_epoch=False)
             self.log('Debug/Train/avg_speckle', self.accumulated_speckle / n, on_step=True, on_epoch=False)
             self.log('Debug/Train/avg_perceptual', self.accumulated_percep / n, on_step=True, on_epoch=False)
+            self.log('Debug/Train/avg_style', self.accumulated_style / n, on_step=True, on_epoch=False)
             if self.gan_enabled:
                 self.log('Debug/Train/avg_G_adv', self.accumulated_adv / n, on_step=True, on_epoch=False)
                 self.log('Debug/Train/avg_D', self.accumulated_d_loss / n, on_step=True, on_epoch=False)
@@ -325,6 +334,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             self.accumulated_freq = 0.0
             self.accumulated_speckle = 0.0
             self.accumulated_percep = 0.0
+            self.accumulated_style = 0.0
             self.accumulated_adv = 0.0
             self.accumulated_d_loss = 0.0
             self.accumulate_count = 0

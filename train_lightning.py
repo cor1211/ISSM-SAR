@@ -102,8 +102,8 @@ def main():
             filename='best-ssim-{epoch:02d}-{step:06d}-val_ssim={Metrics/Val/SSIM:.4f}',
             monitor='Metrics/Val/SSIM',
             mode='max',
-            save_top_k=1,
-            save_last=True,
+            save_top_k=5,
+            save_last=False,
             verbose=True
         ),
         # Save best model by LPIPS (lower is better)
@@ -112,7 +112,7 @@ def main():
             filename='best-lpips-{epoch:02d}-{step:06d}-val_lpips={Metrics/Val/LPIPS:.4f}',
             monitor='Metrics/Val/LPIPS',
             mode='min',
-            save_top_k=1,
+            save_top_k=5,
             save_last=False,
             verbose=True
         ),

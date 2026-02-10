@@ -24,11 +24,13 @@ class VGGPerceptualLoss(nn.Module):
       often found in SAR images (following ESRGAN approach).
     """
     
-    def __init__(self, layer_weights: dict = None, use_input_norm: bool = True, device: str = 'cpu'):
+    def __init__(self, layer_weights: dict = None, style_weights: dict = None, use_input_norm: bool = True, device: str = 'cpu'):
         """
         Args:
-            layer_weights: Dict of layer indices to weights. 
-                           Default uses conv5_4 (before activation).
+            layer_weights: Dict of layer indices to weights for Content Loss. 
+                           Default uses conv4_4 ('26').
+            style_weights: Dict of layer indices to weights for Style Loss.
+                           Default uses relu1_2 ('3'), relu2_2 ('8'), relu3_3 ('15'), relu4_3 ('24').
             use_input_norm: Whether to normalize input with ImageNet stats.
             device: Device to load the VGG model on.
         """
@@ -36,12 +38,18 @@ class VGGPerceptualLoss(nn.Module):
         
         self.use_input_norm = use_input_norm
         
-        # Default layer weights: 'conv4_4' (index 26 in VGG19 features)
-        # This layer captures mid-level texture/structure, better for SAR than deeper layers.
+        # Content loss layers: default 'conv4_4' (index 26)
         if layer_weights is None:
             self.layer_weights = {'26': 1.0}
         else:
             self.layer_weights = layer_weights
+            
+        # Style loss layers: default relu1_2, relu2_2, relu3_3, relu4_3
+        # Indices based on torchvision.models.vgg19 features
+        if style_weights is None:
+            self.style_weights = {'3': 1.0, '8': 1.0, '15': 1.0, '24': 1.0}
+        else:
+            self.style_weights = style_weights
             
         # Load VGG19 pre-trained on ImageNet
         vgg = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1)
@@ -75,22 +83,47 @@ class VGGPerceptualLoss(nn.Module):
             x = self._normalize_input(x)
             
         return x
+        
+    @staticmethod
+    def gram_matrix(input):
+        a, b, c, d = input.size()  # a=batch size(=1)
+        # b=number of feature maps
+        # (c,d)=dimensions of a f. map (N=c*d)
+
+        features = input.view(a, b, c * d)  # resise F_XL into \hat F_XL
+
+        G = torch.bmm(features, features.transpose(1, 2))  # compute the gram product
+
+        # we 'normalize' the values of the gram matrix
+        # by dividing by the number of element in each feature map.
+        return G.div(b * c * d)
 
     def forward(self, input_img, target_img):
         """
-        Compute perceptual loss between input (SR) and target (HR) images.
+        Compute perceptual and style loss between input (SR) and target (HR) images.
+        Returns:
+            content_loss, style_loss
         """
         # Preprocess
         input_img = self._preprocess(input_img)
         target_img = self._preprocess(target_img)
         
-        loss = 0.0
+        content_loss = 0.0
+        style_loss = 0.0
+        
         x = input_img
         y = target_img
         
-        # Iterate through VGG layers to find requested features
-        # We need to sort indices to run forward pass efficiently
-        sorted_indices = sorted([int(k) for k in self.layer_weights.keys()])
+        # Unions of all layers we need
+        content_layers = set(self.layer_weights.keys())
+        style_layers = set(self.style_weights.keys())
+        all_layers = content_layers.union(style_layers)
+        
+        # Iterate through VGG layers
+        sorted_indices = sorted([int(k) for k in all_layers])
+        if not sorted_indices:
+            return content_loss, style_loss
+            
         max_idx = sorted_indices[-1]
         
         for name, layer in self.features.named_children():
@@ -100,16 +133,25 @@ class VGGPerceptualLoss(nn.Module):
             x = layer(x)
             y = layer(y)
             
-            # If this layer is in our weighted list, compute loss
-            if str(idx) in self.layer_weights:
-                weight = self.layer_weights[str(idx)]
-                loss += weight * nn.functional.l1_loss(x, y)
+            idx_str = str(idx)
+            
+            # Content Loss
+            if idx_str in self.layer_weights:
+                weight = self.layer_weights[idx_str]
+                content_loss += weight * nn.functional.l1_loss(x, y)
+            
+            # Style Loss
+            if idx_str in self.style_weights:
+                weight = self.style_weights[idx_str]
+                gram_x = self.gram_matrix(x)
+                gram_y = self.gram_matrix(y)
+                style_loss += weight * nn.functional.l1_loss(gram_x, gram_y)
                 
             # Stop if we went past the last needed layer
             if idx >= max_idx:
                 break
                 
-        return loss
+        return content_loss, style_loss
 
 if __name__ == "__main__":
     # Test
@@ -124,5 +166,6 @@ if __name__ == "__main__":
     sr = torch.rand(2, 1, 256, 256).to(device)
     hr = torch.rand(2, 1, 256, 256).to(device)
     
-    loss = loss_fn(sr, hr)
-    print(f"Perceptual Loss: {loss.item()}")
+    c_loss, s_loss = loss_fn(sr, hr)
+    print(f"Content Loss: {c_loss.item()}")
+    print(f"Style Loss: {s_loss.item()}")
