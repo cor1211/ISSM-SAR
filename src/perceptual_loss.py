@@ -155,6 +155,12 @@ class VGGPerceptualLoss(nn.Module):
                 gram_x = self.gram_matrix(x)
                 gram_y = self.gram_matrix(y)
                 
+                # Granular Debugging
+                if torch.isnan(gram_x).any() or torch.isinf(gram_x).any():
+                     print(f"!! NaN/Inf in Gram_X at layer {idx}. Feature stats: Min={x.min():.2f}, Max={x.max():.2f}, Mean={x.mean():.2f}")
+                if torch.isnan(gram_y).any() or torch.isinf(gram_y).any():
+                     print(f"!! NaN/Inf in Gram_Y at layer {idx}. Feature stats: Min={y.min():.2f}, Max={y.max():.2f}, Mean={y.mean():.2f}")
+                     
                 loss = nn.functional.l1_loss(gram_x, gram_y)
                 style_loss += weight * loss
                 
