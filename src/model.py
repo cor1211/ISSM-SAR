@@ -223,7 +223,8 @@ class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow sc
     def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu', use_bn:bool = True, use_gn = False):
         super().__init__()
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=in_c, out_channels=out_c, kernel_size=kernel_size, stride=stride, padding=padding)
+            nn.Upsample(scale_factor=stride, mode='nearest'),
+            nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=3, stride=1, padding=1)
         )
         self.deconv.append(get_norm_layer(out_c, use_bn, use_gn, num_groups=8))
 
@@ -394,8 +395,9 @@ class ISSM_SAR(nn.Module):
         for idx in range(self.num_ifs+1):
             # sr_up.append(torch.clamp((self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled), -1.0, 1.0))# Out (-255, 255)
             # sr_down.append(torch.clamp((self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled), -1.0, 1.0))
-            sr_up.append(self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled) # Remove clamp [-1, 1]
-            sr_down.append(self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled)
+            # Apply Tanh to ensure output is in [-1, 1] range naturally
+            sr_up.append(torch.tanh(self.rec_up[idx](in_ifs_up[idx]) + in_ft_upsampled)) 
+            sr_down.append(torch.tanh(self.rec_down[idx](in_ifs_down[idx]) + in_se_upsampled))
         
         return sr_up, sr_down
 
