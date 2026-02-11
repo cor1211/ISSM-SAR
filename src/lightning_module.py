@@ -298,7 +298,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Gradient clipping
         grad_clip = self.cfg_train.get('grad_clip', 0.0)
         if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+            self.clip_gradients(opt_g, gradient_clip_val=grad_clip, gradient_clip_algorithm="norm")
         
         opt_g.step()
         self.untoggle_optimizer(opt_g)
