@@ -173,6 +173,15 @@ if __name__ == '__main__':
             
             # Post-process
             sr_fusion = sr_fusion.squeeze(0).squeeze(0) # (H, W)
+
+            # Save raw output if configured
+            if cfg_output.get('save_raw', False):
+                raw_output = sr_fusion.cpu().numpy() # [-1, 1]
+                save_raw_file = Path(save_path) / filename
+                if save_raw_file.suffix != '.npy':
+                    save_raw_file = save_raw_file.with_suffix('.npy')
+                np.save(save_raw_file, raw_output)
+
             sr_fusion = (sr_fusion * cfg_norm['std'] + cfg_norm['mean']).clamp(0, 1)
             output_image = (sr_fusion.cpu() * 255).clamp(0, 255).byte().numpy()
             
@@ -197,8 +206,24 @@ if __name__ == '__main__':
             sr_up, sr_down = model(transformed_s1t1, transformed_s1t2)
         
         #----------------Denorm sr to [0, 255]-------------------
+        #----------------Denorm sr to [0, 255]-------------------
         sr_fusion = 0.5 * sr_up[-1] + 0.5 * sr_down[-1]
         sr_fusion = sr_fusion.squeeze(0).squeeze(0)  # Remove batch and channel dims -> (H, W)
+
+        if cfg_output.get('save_raw', False):
+             # Ensure save_path is treated correctly for raw output
+            if save_path:
+                 save_file_raw = Path(save_path)
+                 if save_file_raw.suffix == '':
+                      os.makedirs(save_file_raw, exist_ok=True)
+                      save_file_raw = save_file_raw / s1t1_path.name
+                 else:
+                      os.makedirs(save_file_raw.parent, exist_ok=True)
+                 
+                 save_file_raw = save_file_raw.with_suffix('.npy')
+                 np.save(save_file_raw, sr_fusion.cpu().numpy())
+                 print(f"Saved raw result to {save_file_raw}")
+
         sr_fusion = (sr_fusion * cfg_norm['std'] + cfg_norm['mean']).clamp(0, 1)
         output_image = (sr_fusion.cpu() * 255).clamp(0, 255).byte().numpy()  # Convert to uint8
         output_image = Image.fromarray(output_image)

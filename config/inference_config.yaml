@@ -1,4 +1,4 @@
-ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/lightning_20260205-165352/best-epoch=02-step=025518.ckpt
+ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints-replace-deconv/best-lpips-epoch=05-step=047790-val_lpips=Metrics/Val/LPIPS=0.2350.ckpt
 device: cuda
 limit: 100 # Optional: Limit number of images to infer (e.g., 100). Set null for all.
 
@@ -12,7 +12,8 @@ input:
 
 output:
   s1sr_path:
-  save_path: test_results_2
+  save_path: valid_results_best-lpips-step=047790_no-deconv-npy
+  save_raw: true # Save raw output as .npy [-1, 1]
 
 # Model architecture config
 model:
