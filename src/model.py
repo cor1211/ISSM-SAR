@@ -222,9 +222,11 @@ class REC(nn.Module): # In = [N, out_HFE, H, W] | Out = [N, 1, 2H, 2W]
 class DeConvBlock(nn.Module): # Keep Channel constance, up-sample H, W follow scale_factor x2
     def __init__(self, in_c, out_c, kernel_size, padding, stride, act_type='prelu', use_bn:bool = True, use_gn = False):
         super().__init__()
+        # PixelShuffle upsampling (ESRGAN-style):
+        # Conv expands channels by stride^2, then PixelShuffle rearranges to spatial dims
         self.deconv = nn.Sequential(
-            nn.Upsample(scale_factor=stride, mode='nearest'),
-            nn.Conv2d(in_channels=in_c, out_channels=out_c, kernel_size=3, stride=1, padding=1)
+            nn.Conv2d(in_channels=in_c, out_channels=out_c * stride * stride, kernel_size=3, stride=1, padding=1),
+            nn.PixelShuffle(stride)
         )
         self.deconv.append(get_norm_layer(out_c, use_bn, use_gn, num_groups=8))
 

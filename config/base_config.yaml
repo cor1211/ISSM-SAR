@@ -18,13 +18,13 @@ train:
   lr: 0.00001
   val_step: 100
   theta_1: 0.0      # Ratio Loss - Disabled
-  theta_2: 0.1      # L1 Loss weight - Reduced to avoid mode collapse/histogram artifacts
-  theta_3: 0.0      # Gradient Loss - Disabled
-  theta_4: 0.0      # Frequency Domain Loss - Disabled
-  theta_5: 0.0      # Speckle-aware loss
+  theta_2: 1.0      # Charbonnier Loss (replaces L1) - Primary reconstruction loss
+  theta_3: 0.1      # Gradient Loss - Edge preservation for man-made structures
+  theta_4: 0.1     # Focal Frequency Loss (adaptive, replaces static freq loss)
+  theta_5: 0.0      # Speckle-aware loss - Disabled (complex, needs separate tuning)
   theta_6: 0.0      # Adversarial loss (dynamic schedule)
   theta_7: 1.0      # Perceptual loss
-  theta_style: 100.0 # Style loss (Gram matrix) weight (increased for relevance)
+  theta_style: 0.0  # Style loss - Disabled (was 100.0, too aggressive for sharpness)
   component_losses: False # Disable intermediate losses for speed
   resume_path: 
   kaggle: 0

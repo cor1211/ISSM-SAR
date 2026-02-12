@@ -9,7 +9,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchvision.utils import make_grid
 
 from src.model import ISSM_SAR
-from src.loss import lratio_loss, gradient_loss, frequency_domain_loss, speckle_aware_loss
+from src.loss import lratio_loss, charbonnier_loss, gradient_loss, FocalFrequencyLoss, speckle_aware_loss
 from src.discriminator import SARPatchDiscriminator
 from src.gan_losses import (
     discriminator_loss_ragan, generator_loss_ragan,
@@ -89,8 +89,15 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         else:
             self.perceptual_loss = None
         
-        # Loss function
-        self.criterion_L1 = nn.L1Loss()
+        # Loss functions
+        # Charbonnier replaces L1 — smoother gradients near zero, better convergence
+        self.criterion_recon = charbonnier_loss
+        
+        # Focal Frequency Loss (replaces static frequency_domain_loss)
+        if self.theta_4 > 0:
+            self.focal_freq_loss = FocalFrequencyLoss(alpha=1.0)
+        else:
+            self.focal_freq_loss = None
         
         # Metrics
         self.val_psnr = PeakSignalNoiseRatio(data_range=1.0)
@@ -130,11 +137,11 @@ class ISSM_SAR_Lightning(pl.LightningModule):
                 if self.theta_1 != 0:
                     total_ratio_loss += lratio_loss(sr_up[idx], hr) + lratio_loss(sr_down[idx], hr)
                 if self.theta_2 != 0:
-                    total_l1_loss += self.criterion_L1(sr_up[idx], hr) + self.criterion_L1(sr_down[idx], hr)
+                    total_l1_loss += self.criterion_recon(sr_up[idx], hr) + self.criterion_recon(sr_down[idx], hr)
                 if self.theta_3 != 0:
                     total_grad_loss += gradient_loss(sr_up[idx], hr) + gradient_loss(sr_down[idx], hr)
-                if self.theta_4 != 0:
-                    total_freq_loss += frequency_domain_loss(sr_up[idx], hr) + frequency_domain_loss(sr_down[idx], hr)
+                if self.theta_4 != 0 and self.focal_freq_loss is not None:
+                    total_freq_loss += self.focal_freq_loss(sr_up[idx], hr) + self.focal_freq_loss(sr_down[idx], hr)
                 if self.theta_5 != 0:
                     total_speckle_loss += speckle_aware_loss(sr_up[idx], hr) + speckle_aware_loss(sr_down[idx], hr)
         
@@ -142,11 +149,11 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         if self.theta_1 != 0:
             total_ratio_loss += lratio_loss(sr_up[-1], hr) + lratio_loss(sr_down[-1], hr)
         if self.theta_2 != 0:
-            total_l1_loss += self.criterion_L1(sr_up[-1], hr) + self.criterion_L1(sr_down[-1], hr)
+            total_l1_loss += self.criterion_recon(sr_up[-1], hr) + self.criterion_recon(sr_down[-1], hr)
         if self.theta_3 != 0:
             total_grad_loss += gradient_loss(sr_up[-1], hr) + gradient_loss(sr_down[-1], hr)
-        if self.theta_4 != 0:
-            total_freq_loss += frequency_domain_loss(sr_up[-1], hr) + frequency_domain_loss(sr_down[-1], hr)
+        if self.theta_4 != 0 and self.focal_freq_loss is not None:
+            total_freq_loss += self.focal_freq_loss(sr_up[-1], hr) + self.focal_freq_loss(sr_down[-1], hr)
         if self.theta_5 != 0:
             total_speckle_loss += speckle_aware_loss(sr_up[-1], hr) + speckle_aware_loss(sr_down[-1], hr)
         
@@ -271,7 +278,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         
         # Add explicit L1 loss on the final fused output
         # This ensures the actual inference output is optimized for reconstruction
-        l1_fusion = self.criterion_L1(sr_fusion, hr)
+        l1_fusion = self.criterion_recon(sr_fusion, hr)
         
         # Total generator loss
         g_total_loss = (
@@ -375,8 +382,8 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         # Fusion output
         sr_fusion = 0.5 * s1sr_up[-1] + 0.5 * s1sr_down[-1]
         
-        # Compute L1 loss
-        l1_loss = self.criterion_L1(sr_fusion, hr)
+        # Compute reconstruction loss (Charbonnier)
+        l1_loss = self.criterion_recon(sr_fusion, hr)
         
         # Denormalize for metrics
         sr_denorm = denorm(sr_fusion)

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 
@@ -54,6 +55,20 @@ def l1_loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(output, target)
 
 
+def charbonnier_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Charbonnier Loss (Robust L1) — used by SwinIR, HAT, ESPCN.
+    
+    L = sqrt((pred - target)^2 + eps^2)
+    
+    Advantages over L1:
+    - Smooth gradient near zero (L1 has discontinuous gradient at 0)
+    - Better convergence for SAR where speckle creates many small residuals
+    - More robust to outliers than L2
+    """
+    return torch.mean(torch.sqrt((pred - target) ** 2 + eps ** 2))
+
+
 def gradient_loss(pred, target):
     # Tính đạo hàm theo phương ngang (x) và dọc (y)
     # pred shape: (B, C, H, W)
@@ -75,23 +90,88 @@ def gradient_loss(pred, target):
 
 # ============== ANTI-OVERSMOOTHING LOSSES ==============
 
+class FocalFrequencyLoss(nn.Module):
+    """
+    Focal Frequency Loss (Jiang et al., ICCV 2021).
+    
+    Key insight: Neural networks have spectral bias toward low-frequency functions.
+    FFL adaptively focuses on "hard frequencies" (those the model struggles with)
+    by dynamically weighting the frequency spectrum based on current prediction errors.
+    
+    Superior to static frequency masking because:
+    - Adaptive: weight matrix updates each iteration based on per-frequency error
+    - alpha parameter controls focus intensity on hard frequencies
+    - Proven to improve both PSNR/SSIM and perceptual quality
+    
+    Args:
+        alpha: Scaling factor for spectrum weight matrix. Higher = more focus on hard frequencies.
+        log_matrix: If True, adjust spectrum weight matrix by logarithm for stability.
+        batch_matrix: If True, calculate weight matrix using batch-based statistics.
+    """
+    def __init__(self, alpha: float = 1.0, log_matrix: bool = False, batch_matrix: bool = False):
+        super().__init__()
+        self.alpha = alpha
+        self.log_matrix = log_matrix
+        self.batch_matrix = batch_matrix
+
+    def _get_frequency_distance(self, pred_freq: torch.Tensor, target_freq: torch.Tensor) -> torch.Tensor:
+        """Compute per-frequency L2 distance between pred and target spectra."""
+        # pred_freq, target_freq: complex tensors [B, C, H, W]
+        # Return: real tensor [B, C, H, W] — per-frequency squared error
+        diff = pred_freq - target_freq
+        # |a + bi|^2 = a^2 + b^2
+        distance = torch.real(diff) ** 2 + torch.imag(diff) ** 2
+        return distance
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pred: Predicted image [B, C, H, W]
+            target: Ground truth image [B, C, H, W]
+        Returns:
+            Focal frequency loss scalar
+        """
+        # Compute 2D FFT
+        pred_freq = torch.fft.fft2(pred, norm='ortho')
+        target_freq = torch.fft.fft2(target, norm='ortho')
+
+        # Per-frequency squared error
+        freq_distance = self._get_frequency_distance(pred_freq, target_freq)  # [B, C, H, W]
+
+        # Compute adaptive weight matrix
+        # Normalize distance to [0, 1] range per sample for weighting
+        if self.batch_matrix:
+            # Use batch-level statistics
+            weight = freq_distance.detach()  # [B, C, H, W]
+            weight = weight / (weight.max() + 1e-8)
+        else:
+            # Use per-sample statistics
+            B = freq_distance.shape[0]
+            weight = freq_distance.detach()
+            # Normalize per sample
+            weight_flat = weight.view(B, -1)
+            weight_max = weight_flat.max(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+            weight = weight / (weight_max + 1e-8)
+
+        # Apply log scaling if configured (for numerical stability with large spectra)
+        if self.log_matrix:
+            weight = torch.log1p(weight)
+
+        # Apply focal weighting: raise to power alpha
+        # Higher alpha → more focus on hard (high-error) frequencies
+        weight = weight ** self.alpha
+
+        # Weighted frequency loss
+        loss = (weight * freq_distance).mean()
+
+        return loss
+
+
 def frequency_domain_loss(pred: torch.Tensor, target: torch.Tensor, 
                           high_freq_weight: float = 1.0) -> torch.Tensor:
     """
-    Frequency-domain loss để preserve high-frequency components (texture, speckle).
-    
-    Cách hoạt động:
-    - Chuyển pred và target sang frequency domain qua FFT
-    - So sánh magnitude spectrum (chứa info về texture)
-    - Emphasis vào high-frequency bands (outer region of spectrum)
-    
-    Args:
-        pred: Predicted SR image [B, C, H, W]
-        target: Ground truth HR image [B, C, H, W]
-        high_freq_weight: Weight cho high-frequency component loss
-    
-    Returns:
-        Combined frequency loss
+    [LEGACY] Static frequency-domain loss — kept for backward compatibility.
+    Consider using FocalFrequencyLoss instead for adaptive frequency weighting.
     """
     # Compute 2D FFT
     pred_fft = torch.fft.fft2(pred)
