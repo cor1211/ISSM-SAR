@@ -413,26 +413,56 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         )
         
         if should_log_images:
-            try:
-                n_imgs = min(8, sr_fusion.size(0))
-                tag_suffix = f"_batch{batch_idx}" if batch_idx > 0 else ""
-                
-                self.logger.experiment.add_image(
-                    f'Image/Val/SR{tag_suffix}', make_grid(sr_denorm[:n_imgs], nrow=4), self.global_step
-                )
-                self.logger.experiment.add_image(
-                    f'Image/Val/HR{tag_suffix}', make_grid(hr_denorm[:n_imgs], nrow=4), self.global_step
-                )
-                self.logger.experiment.add_image(
-                    f'Image/Val/S1T1{tag_suffix}', make_grid(denorm(s1t1)[:n_imgs], nrow=4), self.global_step
-                )
-                self.logger.experiment.add_image(
-                    f'Image/Val/S1T2{tag_suffix}', make_grid(denorm(s1t2)[:n_imgs], nrow=4), self.global_step
-                )
-            except Exception:
-                pass
+            n_imgs = min(8, sr_fusion.size(0))
+            tag_suffix = f"_batch{batch_idx}" if batch_idx > 0 else ""
+            
+            images_dict = {
+                f'Image/Val/SR{tag_suffix}': make_grid(sr_denorm[:n_imgs], nrow=4),
+                f'Image/Val/HR{tag_suffix}': make_grid(hr_denorm[:n_imgs], nrow=4),
+                f'Image/Val/S1T1{tag_suffix}': make_grid(denorm(s1t1)[:n_imgs], nrow=4),
+                f'Image/Val/S1T2{tag_suffix}': make_grid(denorm(s1t2)[:n_imgs], nrow=4),
+            }
+            self._log_images(images_dict)
         
         return {'l1_loss': l1_loss}
+    
+    def _log_images(self, images_dict: dict):
+        """
+        Log images to the active logger(s) in a platform-agnostic way.
+        
+        Handles TensorBoard, WandB, and multi-logger setups automatically.
+        
+        Args:
+            images_dict: Dict of {tag: tensor} where tensor is [C, H, W] in [0, 1].
+        """
+        from pytorch_lightning.loggers import TensorBoardLogger
+        
+        # Get list of loggers (Lightning may have single or list)
+        loggers = self.loggers if hasattr(self, 'loggers') and self.loggers else []
+        if not loggers and self.logger is not None:
+            loggers = [self.logger]
+        
+        for logger in loggers:
+            try:
+                if isinstance(logger, TensorBoardLogger):
+                    for tag, img_tensor in images_dict.items():
+                        logger.experiment.add_image(tag, img_tensor, self.global_step)
+                else:
+                    # WandB or other loggers
+                    try:
+                        import wandb
+                        wandb_images = {}
+                        for tag, img_tensor in images_dict.items():
+                            # [C, H, W] -> [H, W, C] numpy for wandb.Image
+                            img_np = img_tensor.detach().cpu().permute(1, 2, 0).numpy()
+                            if img_np.shape[2] == 1:
+                                img_np = img_np.squeeze(2)
+                            wandb_images[tag] = wandb.Image(img_np, caption=tag)
+                        logger.experiment.log(wandb_images, step=self.global_step)
+                    except (ImportError, AttributeError):
+                        pass
+            except Exception:
+                pass  # Don't crash training because of logging errors
 
     def on_validation_epoch_end(self):
         # Compute final metrics
