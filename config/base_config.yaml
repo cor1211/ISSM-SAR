@@ -21,9 +21,10 @@ train:
   theta_2: 1.0      # L1 Loss weight
   theta_3: 0.0      # Gradient Loss - Disabled
   theta_4: 0.0      # Frequency Domain Loss - Disabled
-  theta_5: 0.0      # Speckle-Aware Loss - Disabled
-  theta_6: 0.0      # Adversarial Loss (GAN) - set via schedule below
-  theta_7: 1.0      # Perceptual Loss weight (increased for relevance)
+  theta_5: 0.0      # Speckle-aware loss
+  theta_6: 0.0      # Adversarial loss (dynamic schedule)
+  theta_7: 1.0      # Perceptual loss
+  theta_style: 100.0 # Style loss (Gram matrix) weight (increased for relevance)
   component_losses: False # Disable intermediate losses for speed
   resume_path: 
   kaggle: 0
