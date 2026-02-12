@@ -74,17 +74,21 @@ def setup_loggers(config: dict, run_name: str):
             wandb_tags = wandb_cfg.get('tags', [])
             log_model = wandb_cfg.get('log_model', False)
             
+            # To ensure resumption works (log to the same chart), we use run_name as the unique ID
+            # and set resume='allow'.
             wb_logger = WandbLogger(
                 project=wandb_project,
                 name=wandb_run_name,
+                id=wandb_run_name,    # Use timestamp-based run_name as unique ID for continuity
+                resume='allow',       # Allow resuming if ID exists
                 entity=wandb_entity,
                 tags=wandb_tags,
                 log_model=log_model,
                 save_dir='runs',
-                config=config,  # Log all hyperparameters to WandB dashboard
+                config=config,
             )
             loggers.append(wb_logger)
-            print(f"  ✅ WandB logger: project={wandb_project}, run={wandb_run_name}")
+            print(f"  ✅ WandB logger: project={wandb_project}, run={wandb_run_name}, id={wandb_run_name}")
             
         except ImportError:
             print("  ⚠️  wandb not installed. Falling back to TensorBoard only.")
