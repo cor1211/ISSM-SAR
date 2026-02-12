@@ -40,6 +40,71 @@ def set_seed(seed=42):
     pl.seed_everything(seed, workers=True)
 
 
+def setup_loggers(config: dict, run_name: str):
+    """
+    Create logger(s) based on config.
+    
+    Supports: 'tensorboard', 'wandb', or 'both'.
+    Returns a single logger or a list of loggers.
+    """
+    logger_cfg = config.get('logger', {})
+    logger_type = logger_cfg.get('type', 'tensorboard').lower()
+    
+    loggers = []
+    
+    # --- TensorBoard ---
+    if logger_type in ('tensorboard', 'both'):
+        tb_logger = TensorBoardLogger(
+            save_dir='runs',
+            name=run_name,
+            default_hp_metric=False
+        )
+        loggers.append(tb_logger)
+        print(f"  ✅ TensorBoard logger: runs/{run_name}")
+    
+    # --- WandB ---
+    if logger_type in ('wandb', 'both'):
+        try:
+            from pytorch_lightning.loggers import WandbLogger
+            
+            wandb_cfg = logger_cfg.get('wandb', {})
+            wandb_run_name = wandb_cfg.get('run_name') or run_name
+            wandb_project = wandb_cfg.get('project', 'ISSM-SAR')
+            wandb_entity = wandb_cfg.get('entity')  # None = default user
+            wandb_tags = wandb_cfg.get('tags', [])
+            log_model = wandb_cfg.get('log_model', False)
+            
+            wb_logger = WandbLogger(
+                project=wandb_project,
+                name=wandb_run_name,
+                entity=wandb_entity,
+                tags=wandb_tags,
+                log_model=log_model,
+                save_dir='runs',
+                config=config,  # Log all hyperparameters to WandB dashboard
+            )
+            loggers.append(wb_logger)
+            print(f"  ✅ WandB logger: project={wandb_project}, run={wandb_run_name}")
+            
+        except ImportError:
+            print("  ⚠️  wandb not installed. Falling back to TensorBoard only.")
+            print("     Install with: pip install wandb")
+            if not loggers:
+                loggers.append(TensorBoardLogger(
+                    save_dir='runs', name=run_name, default_hp_metric=False
+                ))
+    
+    # Fallback: if no logger was created, default to TensorBoard
+    if not loggers:
+        loggers.append(TensorBoardLogger(
+            save_dir='runs', name=run_name, default_hp_metric=False
+        ))
+        print(f"  ✅ TensorBoard logger (default): runs/{run_name}")
+    
+    # Return single logger or list
+    return loggers if len(loggers) > 1 else loggers[0]
+
+
 def main():
     # Argument parser
     parser = argparse.ArgumentParser(description='Train ISSM-SAR with PyTorch Lightning')
@@ -84,12 +149,9 @@ def main():
         except Exception as e:
             print(f"Warning: Could not inspect checkpoint: {e}")
 
-    # Setup logger
-    logger = TensorBoardLogger(
-        save_dir='runs',
-        name=run_name,
-        default_hp_metric=False
-    )
+    # Setup logger(s)
+    print(f"Setting up loggers...")
+    logger = setup_loggers(config, run_name)
 
     # Setup callbacks
     checkpoint_dir = os.path.join('checkpoints', run_name)
@@ -189,9 +251,17 @@ def main():
     print(f"\n{'='*50}")
     print(f"Training completed!")
     print(f"Best model saved at: {checkpoint_dir}")
-    print(f"TensorBoard logs at: runs/{run_name}")
+    
+    # Print logger-specific info
+    logger_type = config.get('logger', {}).get('type', 'tensorboard')
+    if logger_type in ('tensorboard', 'both'):
+        print(f"TensorBoard logs at: runs/{run_name}")
+    if logger_type in ('wandb', 'both'):
+        print(f"WandB dashboard: https://wandb.ai")
+    
     print(f"{'='*50}")
 
 
 if __name__ == '__main__':
     main()
+

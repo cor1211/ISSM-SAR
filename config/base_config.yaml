@@ -18,7 +18,7 @@ train:
   lr: 0.00001
   val_step: 100
   theta_1: 0.0      # Ratio Loss - Disabled
-  theta_2: 0.1      # L1 Loss weight - Reduced to avoid mode collapse/histogram artifacts
+  theta_2: 1.0      # L1 Loss weight - Reduced to avoid mode collapse/histogram artifacts
   theta_3: 0.0      # Gradient Loss - Disabled
   theta_4: 0.0      # Frequency Domain Loss - Disabled
   theta_5: 0.0      # Speckle-aware loss
@@ -54,6 +54,17 @@ discriminator:
 perceptual:
   layer_weights: {'26': 1.0}    # VGG19 conv4_4 (index 26) - better for texture than conv5_4
   use_input_norm: True          # Normalize with ImageNet stats
+
+# Logger config
+logger:
+  type: 'tensorboard'             # 'tensorboard', 'wandb', or 'both'
+  # WandB settings (only used when type is 'wandb' or 'both')
+  wandb:
+    project: 'SR_SAR-ISSM'           # WandB project name
+    entity: "vinhluucongk17-haui"                  # WandB username/team (null = default)
+    run_name: null                # Run name (null = auto-generated)
+    log_model: false              # Upload checkpoints to WandB cloud
+    tags: []                      # Tags for filtering runs
 
 # Lightning config (for train_lightning.py)
 lightning:
