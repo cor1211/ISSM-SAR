@@ -59,4 +59,4 @@ model.gv
 .DS_Store
 Thumbs.db
 
-config/server/
+config/server
