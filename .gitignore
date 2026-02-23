@@ -58,3 +58,5 @@ model.gv
 # OS files
 .DS_Store
 Thumbs.db
+
+config/server/
