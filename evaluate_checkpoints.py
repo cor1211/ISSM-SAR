@@ -33,6 +33,11 @@ def load_image2tensor(image_path: Path, transform: Compose) -> torch.Tensor:
     valid_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
     if image_path.suffix.lower() == '.npy':
         img_np = np.load(image_path).astype(np.float32)
+        
+        # Clean NaN/Inf like in SAR_Dataset.py
+        if np.isnan(img_np).any() or np.isinf(img_np).any():
+            np.nan_to_num(img_np, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
+            
         if img_np.ndim == 2:
             img_np = img_np[np.newaxis, ...]
         elif img_np.ndim == 3 and img_np.shape[2] <= 4:
@@ -99,7 +104,7 @@ def main():
     metrics = {
         'psnr': PeakSignalNoiseRatio(data_range=1.0).to(device),
         'ssim': StructuralSimilarityIndexMeasure(data_range=1.0).to(device),
-        'lpips': LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+        'lpips': LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(device)
     }
     
     if PYIQA_AVAILABLE:
