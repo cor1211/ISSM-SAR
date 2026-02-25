@@ -75,6 +75,10 @@ def main():
     hr_path = Path(ds_cfg['hr_path'])
     limit = ds_cfg.get('limit')
     
+    # Save outputs config
+    save_outputs = config.get('save_outputs', False)
+    output_dir = Path(config.get('output_dir', 'evaluation_outputs'))
+    
     mean = ds_cfg['normalize']['mean']
     std = ds_cfg['normalize']['std']
     
@@ -108,7 +112,7 @@ def main():
     model = ISSM_SAR(config=model_cfg).to(device)
     
     # Find Checkpoints
-    ckpt_dir = config['checkpoint_dir']
+    ckpt_dir = Path(config['checkpoint_dir'])
     run_name = config.get('run_name', 'Branch_Unknown')
     checkpoints = get_checkpoints_in_dir(ckpt_dir)
     
@@ -117,7 +121,7 @@ def main():
         sys.exit(1)
         
     print(f"\n{'='*50}")
-    print(f"Run Name: {run_name}")
+    print(f"Experiment / Run Name: {run_name}")
     print(f"Found {len(checkpoints)} checkpoints in {ckpt_dir}")
     print(f"{'='*50}\n")
 
@@ -125,7 +129,14 @@ def main():
 
     # Evaluate each checkpoint
     for ckpt_path in checkpoints:
-        print(f"\nEvaluating: {ckpt_path.name}")
+        # Extract the subfolder structure relative to the ckpt_dir
+        try:
+            rel_path = ckpt_path.relative_to(ckpt_dir)
+            sub_folder = str(rel_path.parent) if str(rel_path.parent) != '.' else 'root'
+        except ValueError:
+            sub_folder = ckpt_path.parent.name
+            
+        print(f"\n[{run_name} | {sub_folder}] Evaluating: {ckpt_path.name}")
         
         # Load weights
         try:
@@ -171,6 +182,19 @@ def main():
                     with torch.no_grad():
                         musiq_scores.append(metrics['musiq'](sr_rgb).item())
                         clipiqa_scores.append(metrics['clipiqa'](sr_rgb).item())
+                
+                # Save PNG output
+                if save_outputs:
+                    save_path = output_dir / run_name / sub_folder / ckpt_path.name
+                    save_path.mkdir(parents=True, exist_ok=True)
+                    
+                    # sr_01 is shape [1, 1, H, W] in [0, 1] range
+                    out_img_np = (sr_01.squeeze().cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+                    out_img = Image.fromarray(out_img_np, mode='L')
+                    
+                    # Ensure filename is .png
+                    save_filename = Path(filename).with_suffix('.png').name
+                    out_img.save(save_path / save_filename)
 
             except Exception as e:
                 print(f"Error processing {filename}: {e}")
@@ -178,7 +202,8 @@ def main():
         
         # Aggregate scores
         ckpt_results = {
-            'Run_Name': run_name,
+            'Experiment': run_name,
+            'Sub_Folder': sub_folder,
             'Checkpoint': ckpt_path.name,
             'PSNR': metrics['psnr'].compute().item(),
             'SSIM': metrics['ssim'].compute().item(),
