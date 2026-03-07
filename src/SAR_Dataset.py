@@ -13,16 +13,18 @@ def denorm(tensor: torch.Tensor)-> torch.Tensor:
 
 
 class MultiTempSARDataset(Dataset):
-    def __init__(self, root_dir, phase='train', transform=True):
+    def __init__(self, root_dir, phase='train', transform=True, norm_npy=False):
         """
         Args:
             root_dir (str): The path contains sub folders (S1T1, S1T2, S1HR).
             phase (str): 'train' or 'val'.
             transform (bool): Apply Augmentation ? (for only train phase).
+            norm_npy (bool): Normalize input from [0, 1] to [-1, 1].
         """
         self.phase = phase
         root_dir = os.path.join(root_dir, self.phase)
         self.transform = transform
+        self.norm_npy = norm_npy
         
         # Init the path to dir
         self.dir_t1 = os.path.join(root_dir, 'S1T1') # Input1
@@ -89,6 +91,12 @@ class MultiTempSARDataset(Dataset):
             if np.isnan(arr).any() or np.isinf(arr).any():
                 # print(f" Warning: NaN/Inf found in {name} of {filename}, replacing with 0")
                 np.nan_to_num(arr, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
+                
+        # Normalize from [0, 1] to [-1, 1] if needed
+        if self.norm_npy:
+            img_t1 = img_t1 * 2.0 - 1.0
+            img_t2 = img_t2 * 2.0 - 1.0
+            img_hr = img_hr * 2.0 - 1.0
         
         # 2. Process Shape: For sure format [C, H, W]
         # If save raw is [H, W] -> unsqueeze C
@@ -121,7 +129,7 @@ if __name__ == '__main__':
     root_dir = "/mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited"
     toPil = ToPILImage()
 
-    train_set = MultiTempSARDataset(root_dir, phase='train', transform=True)
+    train_set = MultiTempSARDataset(root_dir, phase='train', transform=True, norm_npy=False)
     result_dict = train_set[idx]
     t1_tensor = result_dict['T1']
     t2_tensor = result_dict['T2']

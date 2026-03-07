@@ -28,6 +28,8 @@ class SARDataModule(pl.LightningDataModule):
         
         self.train_dataset = None
         self.val_dataset = None
+        
+        self.norm_npy = self.cfg_data.get('norm_npy', False)
 
     def setup(self, stage=None):
         """Called on every GPU separately - handles data setup"""
@@ -35,12 +37,14 @@ class SARDataModule(pl.LightningDataModule):
             self.train_dataset = MultiTempSARDataset(
                 root_dir=self.root_dir, 
                 phase='train', 
-                transform=True
+                transform=True,
+                norm_npy=self.norm_npy
             )
             self.val_dataset = MultiTempSARDataset(
                 root_dir=self.root_dir, 
                 phase='val', 
-                transform=False
+                transform=False,
+                norm_npy=self.norm_npy
             )
 
     def train_dataloader(self):
