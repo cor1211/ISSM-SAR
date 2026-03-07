@@ -13,7 +13,7 @@ def find_dir(base, experiment, pattern):
 
 def main():
     input_base = Path("/mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val")
-    eval_base = Path("/mnt/data1tb/vinh/ISSM-SAR/evaluation_outputs")
+    eval_base = Path("/mnt/data1tb/vinh/ISSM-SAR/evaluation_outputs_alex_full")
     
     s1t1_dir = input_base / "S1T1"
     s1t2_dir = input_base / "S1T2"
@@ -21,8 +21,8 @@ def main():
     
     # Locate the output folders dynamically
     try:
-        v1_ssim_dir = find_dir(eval_base, "NN_Conv Experiment (Ver 1)", "*ssim*/*/*.ckpt")
-        v1_lpips_dir = find_dir(eval_base, "NN_Conv Experiment (Ver 1)", "*lpips*/*/*.ckpt")
+        v1_ssim_dir = find_dir(eval_base, "NN Conv Experiment (Ver 1)", "*ssim*/*/*.ckpt")
+        v1_lpips_dir = find_dir(eval_base, "NN Conv Experiment (Ver 1)", "*lpips*/*/*.ckpt")
         v2_ssim_dir = find_dir(eval_base, "Pixel Shuffle Experiment (Ver 2)", "*ssim*/*/*.ckpt")
         v2_lpips_dir = find_dir(eval_base, "Pixel Shuffle Experiment (Ver 2)", "*lpips*/*/*.ckpt")
     except Exception as e:
