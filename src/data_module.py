@@ -42,7 +42,7 @@ class SARDataModule(pl.LightningDataModule):
             )
             self.val_dataset = MultiTempSARDataset(
                 root_dir=self.root_dir, 
-                phase='val', 
+                phase='valid', 
                 transform=False,
                 norm_npy=self.norm_npy
             )

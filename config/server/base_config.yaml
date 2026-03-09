@@ -1,0 +1,105 @@
+
+
+# Dataset config
+data:
+  root: /mnt/fwgpu/hdd12tb/code/vinhlc/ISSM-SAR/dataset/vh_dataset_splited
+  train_batch_size: 6
+  test_batch_size: 6
+  train_folder_name: 'train'
+  valid_folder_name: 'valid'
+  num_workers: 2
+  # mean: 0.5
+  # std: 0.5
+  norm_npy: True # If true, normalize input [0, 1] to [-1, 1]
+
+
+# Training config
+train:
+  total_epochs: 500
+  lr: 0.00001
+  val_step: 1000
+  theta_1: 0.0      # Ratio Loss - Disabled
+  theta_2: 1.0      # L1 Loss weight - Reduced to avoid mode collapse/histogram artifacts
+  theta_3: 0.5      # Gradient Loss - Disabled
+  theta_4: 0.0      # Frequency Domain Loss - Disabled
+  theta_5: 0.0      # Speckle-aware loss
+  theta_6: 0.0      # Adversarial loss (dynamic schedule)
+  theta_7: 1.0      # Perceptual loss
+  theta_style: 0.0 # Style loss (Gram matrix) weight (increased for relevance)
+  component_losses: True # Disable intermediate losses for speed
+  resume_path: 
+  kaggle: 0
+  device: cuda:1
+  seed: 42
+  betas: [0.5, 0.999]
+  use_amp: True 
+  grad_clip: 1.0
+
+# GAN training config
+gan:
+  enabled: True                 # Enable/disable adversarial training
+  loss_type: 'ragan'            # 'ragan' or 'lsgan'
+  warmup_epochs: 0              # No warmup
+  ramp_epochs: 0                # No ramp-up - immediate effect
+  max_weight: 0.1               # Strong adversarial weight (0.1)
+  label_smoothing: 0.1          # Light smoothing for stability
+  d_lr_mult: 1.0                # Equal LR for stability at high Adv weight
+
+# Discriminator config
+discriminator:
+  ndf: 64                       # Base feature channels
+  use_spectral_norm: True       # Spectral normalization for stability
+  in_channels: 1                # SAR single channel
+
+# Perceptual Loss config
+perceptual:
+  layer_weights: {'26': 1.0}    # VGG19 conv4_4 (index 26) - better for texture than conv5_4
+  use_input_norm: True          # Normalize with ImageNet stats
+
+# Logger config
+logger:
+  type: 'both'             # 'tensorboard', 'wandb', or 'both'
+  # WandB settings (only used when type is 'wandb' or 'both')
+  wandb:
+    project: 'SR_SAR-ISSM_VH'           # WandB project name
+    entity: "vinhluucongk17-haui"                  # WandB username/team (null = default)
+    run_name: null                # Run name (null = auto-generated)
+    log_model: false              # Upload checkpoints to WandB cloud
+    tags: []                      # Tags for filtering runs
+
+# Lightning config (for train_lightning.py)
+lightning:
+  devices: 2
+  strategy: "ddp"
+  precision: "16-mixed"
+  limit_val_batches: null        # Limit validation batches to speed up evaluation
+
+# Model architecture config
+model:
+  num_ifs: 3
+  use_bn: False
+  use_gn: True
+
+  pfe:
+    in_channels: 1
+    out_channels: 80  
+  
+  hfe:
+    in_c: 80
+    out_c: 80
+    kernel_size: 6
+    padding: 2
+    stride: 2
+    num_blocks: 4
+  
+  rec:
+    in_c: 80
+    out_c: 1
+
+  ifs:
+    in_c: 80
+    out_c: 80
+    num_groups: 3
+    kernel_size: 6
+    padding: 2
+    stride: 2

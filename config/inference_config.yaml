@@ -1,4 +1,4 @@
-ckpt_path: /mnt/data1tb/vinh/ISSM-SAR/checkpoints/nn_conv/lightning_20260212-173050/best-lpips-epoch=40-step=708720-val_lpips=Metrics/Val/LPIPS=0.2271.ckpt
+ckpt_path: /mnt/fwgpu/hdd12tb/code/vinhlc/ISSM-SAR/checkpoints/lightning_20260307-174929/best-ssim-epoch=06-step=125944-val_ssim=Metrics/Val/SSIM=0.3910.ckpt
 device: cuda
 limit: 100 # Optional: Limit number of images to infer (e.g., 100). Set null for all.
 
@@ -7,13 +7,15 @@ normalize:
   std: 0.5
 
 input:
-  s1t1_path: /mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val/S1T1
-  s1t2_path: /mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val/S1T2
+  s1t1_path: /mnt/fwgpu/hdd12tb/code/vinhlc/ISSM-SAR/dataset/vh_dataset_splited/valid/S1T1
+  s1t2_path: /mnt/fwgpu/hdd12tb/code/vinhlc/ISSM-SAR/dataset/vh_dataset_splited/valid/S1T2
+  npy_in_0_1: true # If true, input .npy files are assumed to be in [0,1] and will be converted to model input via (x-mean)/std
 
 output:
-  s1sr_path:
-  save_path: valid_step=708720
+  s1sr_path: /mnt/fwgpu/hdd12tb/code/vinhlc/ISSM-SAR/dataset/vh_dataset_splited/valid/S1HR
+  save_path: /mnt/fwgpu/hdd12tb/code/vinhlc/ISSM-SAR/infer-results/lightning_20260307-174929/best-ssim-epoch=06-step=125944-val_ssim=Metrics/valid_set/
   save_raw: true # Save raw output as .npy [-1, 1]
+  export_npy_0_1: true # If true, also export the denormalized final output as .npy with values in [0,1]
 
 # Model architecture config
 model:

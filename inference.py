@@ -22,7 +22,7 @@ def load_config(config_path: str) -> dict:
         sys.exit(1)
 
 
-def load_image2tensor(image_path: str, transform: Compose) -> torch.Tensor:
+def load_image2tensor(image_path: str, transform: Compose, cfg_norm: dict = None, npy_in_0_1: bool = False) -> torch.Tensor:
     p = Path(image_path)
     if p.suffix == '.npy':
         try:
@@ -30,18 +30,25 @@ def load_image2tensor(image_path: str, transform: Compose) -> torch.Tensor:
             # Ensure shape [C, H, W]
             if img_np.ndim == 2:
                 img_np = img_np[np.newaxis, ...]
-            elif img_np.ndim == 3 and img_np.shape[2] <= 4: # HWC -> CHW
+            elif img_np.ndim == 3 and img_np.shape[2] <= 4:  # HWC -> CHW
                 img_np = img_np.transpose(2, 0, 1)
-            return torch.from_numpy(img_np).unsqueeze(0) # [1, C, H, W]
+
+            # If npy is in [0,1] and user requested conversion, map to model input scale via (x - mean)/std
+            if npy_in_0_1:
+                if cfg_norm is None or 'mean' not in cfg_norm or 'std' not in cfg_norm:
+                    raise ValueError("cfg_norm with 'mean' and 'std' required when input.npy_in_0_1 is True")
+                img_np = (img_np - cfg_norm['mean']) / cfg_norm['std']
+
+            return torch.from_numpy(img_np).unsqueeze(0)  # [1, C, H, W]
         except Exception as e:
             print(f'Error loading npy file at {image_path}: {e}')
             sys.exit(1)
 
     try:
-        image = Image.open(p).convert('L') # HWC [0, 255]
+        image = Image.open(p).convert('L')  # HWC [0, 255]
         # transform
-        transformed_img = transform(image) # [C, H, W] [-1, 1]
-        return transformed_img.unsqueeze(0) # [1, C, H, W] [-1, 1]
+        transformed_img = transform(image)  # [C, H, W] [-1, 1]
+        return transformed_img.unsqueeze(0)  # [1, C, H, W] [-1, 1]
     except Exception as e:
         print(f'Can open image at {image_path}: {e}')
         sys.exit(1)
@@ -83,15 +90,25 @@ if __name__ == '__main__':
 
     #--------Check checkpoint_path--------
     if not os.path.exists(Path(ckpt_path)):
-        raise FileNotFoundError(f'Not found checkpoint file at {Path(args.checkpoint_path)}')
+        raise FileNotFoundError(f'Not found checkpoint file at {Path(ckpt_path)}')
 
     #--------Init Transform------------
-    transform = Compose(    
-        transforms=[
-            ToTensor(),
-            Normalize(mean=[cfg_norm['mean']], std=[cfg_norm['std']])
-        ]
-    )
+    transform = Compose([
+        ToTensor(),
+        Normalize(mean=[cfg_norm['mean']], std=[cfg_norm['std']])
+    ])
+
+    # New flags: whether .npy inputs are in [0,1] and whether to export denorm .npy in [0,1]
+    npy_in_0_1 = cfg_input.get('npy_in_0_1', False)
+    export_npy_0_1 = cfg_output.get('export_npy_0_1', False)
+
+    # Simple validation
+    if not isinstance(cfg_norm.get('mean', None), (int, float)) or not isinstance(cfg_norm.get('std', None), (int, float)):
+        raise ValueError("normalize.mean and normalize.std must be numeric in config")
+    if not isinstance(npy_in_0_1, bool):
+        raise ValueError("input.npy_in_0_1 must be boolean")
+    if not isinstance(export_npy_0_1, bool):
+        raise ValueError("output.export_npy_0_1 must be boolean")
 
     #-------Init device--------------
     device = load_device(device_name)
@@ -160,8 +177,8 @@ if __name__ == '__main__':
                 
             # Load
             try:
-                t_s1t1 = load_image2tensor(p_t1, transform).to(device)
-                t_s1t2 = load_image2tensor(p_t2, transform).to(device)
+                t_s1t1 = load_image2tensor(p_t1, transform, cfg_norm=cfg_norm, npy_in_0_1=npy_in_0_1).to(device)
+                t_s1t2 = load_image2tensor(p_t2, transform, cfg_norm=cfg_norm, npy_in_0_1=npy_in_0_1).to(device)
             except Exception as e:
                 print(f"Error loading {filename}: {e}")
                 continue
@@ -183,6 +200,14 @@ if __name__ == '__main__':
                 np.save(save_raw_file, raw_output)
 
             sr_fusion = (sr_fusion * cfg_norm['std'] + cfg_norm['mean']).clamp(0, 1)
+
+            # Optionally export denormalized .npy in [0,1]
+            if export_npy_0_1:
+                npy_out = sr_fusion.cpu().numpy()
+                npy_save_file = Path(save_path) / filename
+                npy_save_file = npy_save_file.with_suffix('.npy')
+                np.save(npy_save_file, npy_out)
+
             output_image = (sr_fusion.cpu() * 255).clamp(0, 255).byte().numpy()
             
             # Save
@@ -198,8 +223,8 @@ if __name__ == '__main__':
         print(f"{30*'-'} Single Image Inference Mode {30*'-'}")
         
         #--------Transform to Tensor: 1CHW & [-1, 1]---------
-        transformed_s1t1 = load_image2tensor(s1t1_path, transform).to(device)
-        transformed_s1t2 = load_image2tensor(s1t2_path, transform).to(device)
+        transformed_s1t1 = load_image2tensor(s1t1_path, transform, cfg_norm=cfg_norm, npy_in_0_1=npy_in_0_1).to(device)
+        transformed_s1t2 = load_image2tensor(s1t2_path, transform, cfg_norm=cfg_norm, npy_in_0_1=npy_in_0_1).to(device)
 
         #---------------Infer SR------------------
         with torch.no_grad():
@@ -225,6 +250,22 @@ if __name__ == '__main__':
                  print(f"Saved raw result to {save_file_raw}")
 
         sr_fusion = (sr_fusion * cfg_norm['std'] + cfg_norm['mean']).clamp(0, 1)
+        # Optionally export denormalized .npy in [0,1]
+        if export_npy_0_1:
+            npy_out = sr_fusion.cpu().numpy()
+            if save_path:
+                npy_save_file = Path(save_path)
+                if npy_save_file.suffix == '':
+                    os.makedirs(npy_save_file, exist_ok=True)
+                    npy_save_file = npy_save_file / s1t1_path.name
+                else:
+                    os.makedirs(npy_save_file.parent, exist_ok=True)
+                npy_save_file = npy_save_file.with_suffix('.npy')
+            else:
+                npy_save_file = Path(s1t1_path.name).with_suffix('.npy')
+            np.save(npy_save_file, npy_out)
+            print(f"Saved denormalized .npy output to {npy_save_file}")
+
         output_image = (sr_fusion.cpu() * 255).clamp(0, 255).byte().numpy()  # Convert to uint8
         output_image = Image.fromarray(output_image)
         
