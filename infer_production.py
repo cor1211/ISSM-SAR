@@ -175,6 +175,21 @@ class SARInferencer:
         return model
 
     # ----------------------------------------------------------
+    #  VRAM Logging
+    # ----------------------------------------------------------
+    @staticmethod
+    def _log_vram(stage: str) -> None:
+        """Log current GPU memory usage if CUDA is available."""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+            reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+            max_alloc = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            logger.info(
+                f"  [VRAM] {stage} | Allocated: {allocated:.1f} MB | "
+                f"Reserved: {reserved:.1f} MB | Peak: {max_alloc:.1f} MB"
+            )
+
+    # ----------------------------------------------------------
     #  Normalisation (dB ↔ [-1, 1])
     # ----------------------------------------------------------
     @staticmethod
@@ -483,26 +498,71 @@ class SARInferencer:
         logger.info(f"  ✓ Saved: {path}  |  shape=({bands}, {h}, {w})")
 
     # ----------------------------------------------------------
+    #  Directory Scanning
+    # ----------------------------------------------------------
+    @staticmethod
+    def _scan_input_dir(
+        input_dir: Path, t1_prefix: str, t2_prefix: str
+    ) -> List[Tuple[str, Path, Path]]:
+        """Scan directory and return matched pairs (identifier, t1_path, t2_path)."""
+        if not input_dir.exists():
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+            
+        all_files = list(input_dir.glob("*.tif")) + list(input_dir.glob("*.tiff"))
+        
+        t1_files: Dict[str, Path] = {}
+        t2_files: Dict[str, Path] = {}
+        
+        for f in all_files:
+            name = f.stem
+            if name.startswith(t1_prefix):
+                iden = name[len(t1_prefix):]
+                t1_files[iden] = f
+            elif name.startswith(t2_prefix):
+                iden = name[len(t2_prefix):]
+                t2_files[iden] = f
+                
+        # Matching pairs
+        pairs = []
+        for iden, p1 in t1_files.items():
+            if iden in t2_files:
+                pairs.append((iden, p1, t2_files[iden]))
+            else:
+                logger.warning(f"  [!] Missing T2: Found {p1.name} but no matching T2 for identifier '{iden}'")
+                
+        for iden, p2 in t2_files.items():
+            if iden not in t1_files:
+                logger.warning(f"  [!] Missing T1: Found {p2.name} but no matching T1 for identifier '{iden}'")
+                
+        # Sort for stable execution
+        pairs.sort(key=lambda x: x[0])
+        return pairs
+
+    # ----------------------------------------------------------
     #  Main entry point
     # ----------------------------------------------------------
     def run(self) -> None:
-        """Execute the full production inference pipeline.
+        """Execute the full production inference pipeline for a directory.
 
         Steps:
-          1. Read input GeoTIFFs (T1, T2) — 2 bands each (VV, VH)
-          2. Normalise each band (dB → [-1,1])
-          3. Run sliding-window inference per band
-          4. Denormalize ([-1,1] → dB)
-          5. Stack VV + VH → 2-band output
-          6. Write output GeoTIFF with halved pixel size
+          1. Scan input directory for valid T1/T2 pairs
+          2. Loop over each pair:
+             a. Read GeoTIFFs (2 bands each: VV, VH)
+             b. Normalise (dB → [-1,1])
+             c. Infer VV and VH sequentially 
+             d. Denormalize ([-1,1] → dB)
+             e. Write Output (PhiênHiệu_SR_x2.tif)
         """
-        t_start = time.time()
+        t_global_start = time.time()
 
         # ── paths ──
         cfg_in = self.config["input"]
         cfg_out = self.config["output"]
-        t1_path = Path(cfg_in["s1t1_path"])
-        t2_path = Path(cfg_in["s1t2_path"])
+        
+        input_dir = Path(cfg_in.get("input_dir", "data/input"))
+        t1_prefix = cfg_in.get("t1_prefix", "s1t1_")
+        t2_prefix = cfg_in.get("t2_prefix", "s1t2_")
+        
         save_dir = Path(cfg_out["save_path"])
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -511,110 +571,137 @@ class SARInferencer:
         blockxsize = cfg_out.get("blockxsize", 256)
         blockysize = cfg_out.get("blockysize", 256)
 
-        # ── 1. Read inputs ──
+        # ── 1. Scan inputs ──
         logger.info("=" * 60)
-        logger.info("Step 1/5 — Reading input GeoTIFFs")
+        logger.info(f"Scanning directory: {input_dir}")
+        logger.info(f"Looking for prefixes: T1='{t1_prefix}', T2='{t2_prefix}'")
         logger.info("=" * 60)
-        data_t1, meta_t1 = self._read_geotiff(t1_path)
-        data_t2, meta_t2 = self._read_geotiff(t2_path)
+        
+        pairs = self._scan_input_dir(input_dir, t1_prefix, t2_prefix)
+        if not pairs:
+            logger.error("No valid T1/T2 pairs found. Please check filenames and directory.")
+            return
+            
+        logger.info(f"==> Found {len(pairs)} perfect pairs for inference.")
+        
+        # ── Process each pair ──
+        for idx, (iden, t1_path, t2_path) in enumerate(pairs, 1):
+            t_start = time.time()
+            logger.info("=" * 60)
+            logger.info(f"Processing Pair {idx}/{len(pairs)}  |  Identifier: '{iden}'")
+            logger.info("=" * 60)
 
-        # Validate shapes
-        if data_t1.shape != data_t2.shape:
-            raise ValueError(
-                f"T1 and T2 shape mismatch: {data_t1.shape} vs {data_t2.shape}"
+            data_t1, meta_t1 = self._read_geotiff(t1_path)
+            data_t2, meta_t2 = self._read_geotiff(t2_path)
+
+            # Validate shapes
+            if data_t1.shape != data_t2.shape:
+                logger.error(f"  [!] Skipped '{iden}': Shape mismatch {data_t1.shape} vs {data_t2.shape}")
+                continue
+            if data_t1.shape[0] < 2:
+                logger.error(f"  [!] Skipped '{iden}': Expected at least 2 bands (VV, VH), got {data_t1.shape[0]}")
+                continue
+
+            n_bands, orig_h, orig_w = data_t1.shape
+            logger.info(f"  Image size: {orig_w}×{orig_h}, bands={n_bands}")
+    
+            # Extract bands: Band 1 = VV, Band 2 = VH
+            vv_t1 = data_t1[0]  # (H, W)
+            vh_t1 = data_t1[1]  # (H, W)
+            vv_t2 = data_t2[0]
+            vh_t2 = data_t2[1]
+    
+            # ── 2. Normalise dB → [-1, 1] ──
+            logger.info("=" * 60)
+            logger.info("Step 2/5 — Normalising (dB → [-1, 1])")
+            logger.info("=" * 60)
+            vv_t1_norm = self.normalize_db(vv_t1)
+            vh_t1_norm = self.normalize_db(vh_t1)
+            vv_t2_norm = self.normalize_db(vv_t2)
+            vh_t2_norm = self.normalize_db(vh_t2)
+            logger.info(
+                f"  VV range after norm: [{vv_t1_norm.min():.4f}, {vv_t1_norm.max():.4f}]"
             )
-        if data_t1.shape[0] < 2:
-            raise ValueError(
-                f"Expected at least 2 bands (VV, VH), got {data_t1.shape[0]}"
+            logger.info(
+                f"  VH range after norm: [{vh_t1_norm.min():.4f}, {vh_t1_norm.max():.4f}]"
+            )
+    
+            # ── 3. Infer VV ──
+            logger.info("=" * 60)
+            logger.info("Step 3/5 — Inference: VV polarisation")
+            logger.info("=" * 60)
+            
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                
+            sr_vv = self._infer_band(self.model_vv, vv_t1_norm, vv_t2_norm)
+            self._log_vram("After VV Inference")
+    
+            # ── 4. Infer VH ──
+            logger.info("=" * 60)
+            logger.info("Step 4/5 — Inference: VH polarisation")
+            logger.info("=" * 60)
+            
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                
+            sr_vh = self._infer_band(self.model_vh, vh_t1_norm, vh_t2_norm)
+            self._log_vram("After VH Inference")
+    
+            # ── 5. Denormalize & write output ──
+            logger.info("=" * 60)
+            logger.info("Step 5/5 — Denormalising & writing output")
+            logger.info("=" * 60)
+    
+            sr_vv_db = self.denormalize_db(sr_vv)
+            sr_vh_db = self.denormalize_db(sr_vh)
+            logger.info(
+                f"  VV SR dB range: [{sr_vv_db.min():.2f}, {sr_vv_db.max():.2f}]"
+            )
+            logger.info(
+                f"  VH SR dB range: [{sr_vh_db.min():.2f}, {sr_vh_db.max():.2f}]"
+            )
+    
+            # Stack → (2, 2H, 2W)
+            sr_output = np.stack([sr_vv_db, sr_vh_db], axis=0)
+    
+            # ── Update geospatial transform (pixel size ÷ 2) ──
+            src_transform: Affine = meta_t1["transform"]
+            sr_transform = Affine(
+                src_transform.a / 2.0,   # pixel width  (halved)
+                src_transform.b,
+                src_transform.c,         # top-left X
+                src_transform.d,
+                src_transform.e / 2.0,   # pixel height (halved, negative)
+                src_transform.f,         # top-left Y
+            )
+    
+            # ── output filename ──
+            # Naming format: <phiên_hiệu>_SR_x2.tif
+            out_name = f"{iden}_SR_x2.tif"
+            out_path = save_dir / out_name
+
+            self._write_geotiff(
+                out_path,
+                sr_output,
+                meta_t1,
+                sr_transform,
+                compression=compression,
+                tiled=tiled,
+                blockxsize=blockxsize,
+                blockysize=blockysize,
             )
 
-        n_bands, orig_h, orig_w = data_t1.shape
-        logger.info(f"  Image size: {orig_w}×{orig_h}, bands={n_bands}")
-
-        # Extract bands: Band 1 = VV, Band 2 = VH
-        vv_t1 = data_t1[0]  # (H, W)
-        vh_t1 = data_t1[1]  # (H, W)
-        vv_t2 = data_t2[0]
-        vh_t2 = data_t2[1]
-
-        # ── 2. Normalise dB → [-1, 1] ──
+            elapsed = time.time() - t_start
+            logger.info(f"  ✓ Finished '{iden}' in {elapsed:.1f}s")
+            logger.info(
+                f"  ✓ Output: {out_path} "
+                f"({sr_output.shape[2]}×{sr_output.shape[1]}, {sr_output.shape[0]} bands)"
+            )
+            
+        total_time = time.time() - t_global_start
         logger.info("=" * 60)
-        logger.info("Step 2/5 — Normalising (dB → [-1, 1])")
-        logger.info("=" * 60)
-        vv_t1_norm = self.normalize_db(vv_t1)
-        vh_t1_norm = self.normalize_db(vh_t1)
-        vv_t2_norm = self.normalize_db(vv_t2)
-        vh_t2_norm = self.normalize_db(vh_t2)
-        logger.info(
-            f"  VV range after norm: [{vv_t1_norm.min():.4f}, {vv_t1_norm.max():.4f}]"
-        )
-        logger.info(
-            f"  VH range after norm: [{vh_t1_norm.min():.4f}, {vh_t1_norm.max():.4f}]"
-        )
-
-        # ── 3. Infer VV ──
-        logger.info("=" * 60)
-        logger.info("Step 3/5 — Inference: VV polarisation")
-        logger.info("=" * 60)
-        sr_vv = self._infer_band(self.model_vv, vv_t1_norm, vv_t2_norm)
-
-        # ── 4. Infer VH ──
-        logger.info("=" * 60)
-        logger.info("Step 4/5 — Inference: VH polarisation")
-        logger.info("=" * 60)
-        sr_vh = self._infer_band(self.model_vh, vh_t1_norm, vh_t2_norm)
-
-        # ── 5. Denormalize & write output ──
-        logger.info("=" * 60)
-        logger.info("Step 5/5 — Denormalising & writing output")
-        logger.info("=" * 60)
-
-        sr_vv_db = self.denormalize_db(sr_vv)
-        sr_vh_db = self.denormalize_db(sr_vh)
-        logger.info(
-            f"  VV SR dB range: [{sr_vv_db.min():.2f}, {sr_vv_db.max():.2f}]"
-        )
-        logger.info(
-            f"  VH SR dB range: [{sr_vh_db.min():.2f}, {sr_vh_db.max():.2f}]"
-        )
-
-        # Stack → (2, 2H, 2W)
-        sr_output = np.stack([sr_vv_db, sr_vh_db], axis=0)
-
-        # ── Update geospatial transform (pixel size ÷ 2) ──
-        src_transform: Affine = meta_t1["transform"]
-        sr_transform = Affine(
-            src_transform.a / 2.0,   # pixel width  (halved)
-            src_transform.b,
-            src_transform.c,         # top-left X
-            src_transform.d,
-            src_transform.e / 2.0,   # pixel height (halved, negative)
-            src_transform.f,         # top-left Y
-        )
-
-        # ── output filename ──
-        stem = t1_path.stem
-        out_name = f"{stem}_SR_x2.tif"
-        out_path = save_dir / out_name
-
-        self._write_geotiff(
-            out_path,
-            sr_output,
-            meta_t1,
-            sr_transform,
-            compression=compression,
-            tiled=tiled,
-            blockxsize=blockxsize,
-            blockysize=blockysize,
-        )
-
-        elapsed = time.time() - t_start
-        logger.info("=" * 60)
-        logger.info(f"Done!  Total time: {elapsed:.1f}s")
-        logger.info(
-            f"Output: {out_path}  "
-            f"({sr_output.shape[2]}×{sr_output.shape[1]}, {sr_output.shape[0]} bands)"
-        )
+        logger.info(f"All {len(pairs)} pairs processed successfully in {total_time:.1f}s!")
         logger.info("=" * 60)
 
 
@@ -636,9 +723,20 @@ def main() -> None:
         default="config/infer_config.yaml",
         help="Path to the production inference YAML config.",
     )
+    parser.add_argument(
+        "--out_name",
+        type=str,
+        default=None,
+        help="Override the output filename (e.g. 'E_48_44_B_a_4_SR_x2.tif')",
+    )
     args = parser.parse_args()
 
     config = load_yaml(args.config)
+    
+    if args.out_name:
+        if "output" not in config:
+            config["output"] = {}
+        config["output"]["save_name"] = args.out_name
 
     try:
         inferencer = SARInferencer(config)

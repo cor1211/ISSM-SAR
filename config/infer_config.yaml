@@ -30,8 +30,9 @@ inference:
 
 # --- Input ---
 input:
-  s1t1_path: "data/input/s1t1.tif"   # Path to Time-1 GeoTIFF (2-band: VV, VH) mapped inside container
-  s1t2_path: "data/input/s1t2.tif"   # Path to Time-2 GeoTIFF (2-band: VV, VH) mapped inside container
+  input_dir: "data/input"      # Directory containing multiple T1 and T2 images
+  t1_prefix: "s1t1_"           # Prefix identifying T1 images (e.g., s1t1_E_48_44.tif)
+  t2_prefix: "s1t2_"           # Prefix identifying T2 images (e.g., s1t2_E_48_44.tif)
 
 # --- Output ---
 output:
