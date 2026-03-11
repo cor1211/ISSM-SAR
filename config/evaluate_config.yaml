@@ -1,0 +1,49 @@
+dataset:
+  s1t1_path: '/mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val/S1T1'
+  s1t2_path: '/mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val/S1T2'
+  hr_path: '/mnt/data1tb/vinh/ISSM-SAR/dataset/fine-tune_splited/val/S1HR'
+  limit: null # Giới hạn số lượng ảnh valid để test nhanh. Set null để chạy toàn bộ.
+  batch_size: 32
+  normalize:
+    mean: 0.5
+    std: 0.5
+
+# Device configuration (e.g., 'cuda:0', 'cpu')
+device: "cuda"
+
+# Output configuration
+output_csv: "evaluation_results_ver1_alex_pixshuf_full.csv"
+save_outputs: true              # Lưu ảnh output ra dạng .png
+output_dir: "evaluation_outputs_alex_full" # Thư mục gốc để lưu ảnh (sẽ tự chia theo branch/subfolder/checkpoint)
+
+# Metadata cho report
+run_name: "Pixel Shuffle Experiment (Ver 2)"
+
+# Thư mục chứa các checkpoints cần evaluate
+checkpoint_dir: "/mnt/data1tb/vinh/ISSM-SAR/checkpoints/pix_shuf_best"
+
+# Cấu hình kiến trúc model (phải khớp với code trong src/model.py của branch hiện tại)
+model_config:
+  num_ifs: 3
+  use_bn: False
+  use_gn: True
+  pfe:
+    in_channels: 1
+    out_channels: 80
+  hfe:
+    in_c: 80
+    out_c: 80
+    kernel_size: 6
+    padding: 2
+    stride: 2
+    num_blocks: 4
+  rec:
+    in_c: 80
+    out_c: 1
+  ifs:
+    in_c: 80
+    out_c: 80
+    num_groups: 3
+    kernel_size: 6
+    padding: 2
+    stride: 2

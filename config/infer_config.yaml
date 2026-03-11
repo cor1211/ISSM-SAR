@@ -1,0 +1,42 @@
+# ============================================================
+# ISSM_SAR Production Inference Configuration
+# ============================================================
+
+# --- Device ---
+device: "cuda"  # "cuda", "cuda:0", "cpu"
+
+# --- Model Architecture ---
+# Path to the YAML containing the 'model' key.
+# We use inference_config.yaml because it contains the correct 80-channel model configuration.
+model_config_path: "config/inference_config.yaml"
+
+# --- Checkpoints (one per polarization) ---
+ckpt_path_vv: "weights/vv_LPIPS=0.2271.ckpt"
+ckpt_path_vh: "weights/vh_LPIPS=0.2632.ckpt"
+
+# --- SAR dB Normalization ---
+# Input TIF values are assumed to be in dB.
+# Pipeline: clip [v_min, v_max] -> scale [0, 1] -> scale [-1, 1]
+normalization:
+  v_min: -25.0
+  v_max: 5.0
+
+# --- Sliding Window Inference ---
+inference:
+  patch_size: 128       # Input patch size (pixels)
+  overlap: 0.25         # Fractional overlap between patches (0.0 - 0.5)
+  batch_size: 16        # Number of patches per GPU batch
+  use_amp: true         # Use torch.cuda.amp.autocast for FP16 inference
+
+# --- Input ---
+input:
+  s1t1_path: "data/input/s1t1.tif"   # Path to Time-1 GeoTIFF (2-band: VV, VH) mapped inside container
+  s1t2_path: "data/input/s1t2.tif"   # Path to Time-2 GeoTIFF (2-band: VV, VH) mapped inside container
+
+# --- Output ---
+output:
+  save_path: "data/output"             # Output directory
+  compression: "DEFLATE"               # GeoTIFF compression (DEFLATE, LZW, ZSTD, NONE)
+  tiled: true                          # Write tiled GeoTIFF for efficient random access
+  blockxsize: 256                      # Tile width
+  blockysize: 256                      # Tile height
