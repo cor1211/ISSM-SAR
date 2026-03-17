@@ -248,3 +248,152 @@ với:
 Nếu bạn muốn, mình có thể làm tiếp một phần rất hữu ích:
 1. viết sẵn 3 command template cho `production`, `strict newest`, và `same-orbit`
 2. hoặc thêm một `docs/how_to_run_pipeline.md` riêng, gọn kiểu runbook để bạn dùng trực tiếp cho vận hành.
+
+**12. Chạy bằng Docker (đã build image `issm-sar-pipeline:latest`)**
+
+Image hiện có:
+- `ENTRYPOINT ["python", "sar_pipeline.py"]`
+- `WORKDIR /app`
+
+Vì vậy khi chạy `docker run`, bạn chỉ cần truyền các args của `sar_pipeline.py`.
+
+Mount khuyến nghị:
+- `geojson` (read-only)
+- `config` (read-only)
+- `weights` (read-only)
+- `runs/customer_jobs` (read-write)
+- `.env` (read-only) nếu cần S3/STAC auth
+
+Lệnh production khuyến nghị (GPU):
+
+```bash
+docker run --rm -it --gpus all \
+  --env-file .env \
+  -v "$(pwd)/geojson:/app/geojson:ro" \
+  -v "$(pwd)/config:/app/config:ro" \
+  -v "$(pwd)/weights:/app/weights:ro" \
+  -v "$(pwd)/runs/customer_jobs:/app/runs/customer_jobs" \
+  issm-sar-pipeline:latest \
+  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
+  --config config/pipeline_config.yaml \
+  --datetime 2025-07-01/2025-09-10 \
+  --output-dir runs/customer_jobs \
+  --cache-staging \
+  --device cuda
+```
+
+Lệnh production khuyến nghị (CPU):
+
+```bash
+docker run --rm -it \
+  --env-file .env \
+  -v "$(pwd)/geojson:/app/geojson:ro" \
+  -v "$(pwd)/config:/app/config:ro" \
+  -v "$(pwd)/weights:/app/weights:ro" \
+  -v "$(pwd)/runs/customer_jobs:/app/runs/customer_jobs" \
+  issm-sar-pipeline:latest \
+  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
+  --config config/pipeline_config.yaml \
+  --datetime 2025-07-01/2025-09-10 \
+  --output-dir runs/customer_jobs \
+  --cache-staging \
+  --device cpu
+```
+
+Template tham số theo tình huống (giữ nguyên lệnh Docker, chỉ đổi phần args cuối):
+
+`strict newest` (ưu tiên mới nhất tuyệt đối):
+
+```bash
+--geojson geojson/<customer_aoi>.geojson \
+--config config/pipeline_config.yaml \
+--datetime 2025-01-01/2025-12-31 \
+--output-dir runs/customer_jobs \
+--cache-staging \
+--device cuda
+```
+
+`same-orbit` (đồng nhất quỹ đạo hơn):
+
+```bash
+--geojson geojson/<customer_aoi>.geojson \
+--config config/pipeline_config.yaml \
+--datetime 2025-01-01/2025-12-31 \
+--same-orbit-direction \
+--output-dir runs/customer_jobs \
+--cache-staging \
+--device cuda
+```
+
+`window chặt hơn` (muốn window có nhiều scene hơn):
+
+```bash
+--geojson geojson/<customer_aoi>.geojson \
+--config config/pipeline_config.yaml \
+--datetime 2025-01-01/2025-12-31 \
+--min-scenes-per-window 2 \
+--output-dir runs/customer_jobs \
+--cache-staging \
+--device cuda
+```
+
+Nếu hệ STAC/S3 dùng AWS profile thay vì `.env`, mount thêm:
+
+```bash
+-v "$HOME/.aws:/root/.aws:ro"
+```
+
+Lưu ý khi chạy Docker:
+- Không cần `conda activate`.
+- Đường dẫn trong args nên là path trong container (`/app/...`), ví dụ dùng `geojson/...`, `config/...`, `runs/...` như các lệnh ở trên.
+- Nếu máy không có GPU runtime của Docker/NVIDIA, bỏ `--gpus all` và đặt `--device cpu`.
+
+**13. Ghi chú nhanh: tham số bắt buộc vs mặc định**
+
+Nhóm **nhất định phải truyền** khi chạy (`python sar_pipeline.py` hoặc `docker run ...`):
+- `--geojson`
+  - Không có default ở CLI.
+  - Nếu thiếu sẽ lỗi ngay vì parser đang `required=True`.
+
+Nhóm **đã set mặc định ngay ở CLI**:
+- `--config`
+  - default: `config/pipeline_config.yaml`
+- `--same-orbit-direction`
+  - default: `false` (chỉ bật khi bạn truyền flag)
+- `--auto-relax`
+  - default: `false` (chỉ bật khi bạn truyền flag)
+- `--cache-staging`
+  - default: `false` ở CLI (nhưng xem thêm mục dưới vì config có thể bật cache)
+
+Nhóm **không có default ở CLI (`default=None`), nên sẽ lấy từ config**:
+- `--mode`
+  - mặc định từ config: `workflow.mode = stac_trainlike_composite`
+- `--datetime`
+  - mặc định từ config: `stac.datetime = null`
+  - nghĩa là thực tế bạn **nên truyền** để tránh query quá rộng/khó kiểm soát
+- `--min-delta-hours`
+  - mặc định từ config: `pairing.min_delta_hours = 24.0`
+- `--max-delta-days`
+  - mặc định từ config: `pairing.max_delta_days = 10`
+- `--min-aoi-coverage`
+  - mặc định từ config: `pairing.min_aoi_coverage = 1.0`
+- `--window-before-days`
+  - mặc định từ config: `trainlike.window_before_days = 30`
+- `--window-after-days`
+  - mặc định từ config: `trainlike.window_after_days = 30`
+- `--min-scenes-per-window`
+  - mặc định từ config: `trainlike.min_scenes_per_window = 1`
+- `--target-crs`
+  - mặc định từ config: `trainlike.target_crs = EPSG:3857`
+- `--target-resolution`
+  - mặc định từ config: `trainlike.target_resolution = 10.0`
+- `--focal-median-radius-m`
+  - mặc định từ config: `trainlike.focal_median_radius_m = 15.0`
+- `--device`
+  - mặc định từ infer config: `config/infer_config.yaml -> device = cuda`
+- `--output-dir`
+  - mặc định từ config: `output.root_dir = runs/pipeline`
+
+Ghi chú quan trọng:
+- `--cache-staging` là flag CLI (mặc định `false`), nhưng nếu `staging.cache_aligned_inputs = true` trong config thì pipeline vẫn cache.
+- Vì `stac.datetime` trong config đang `null`, để chạy production ổn định bạn nên luôn truyền `--datetime`.

@@ -194,21 +194,27 @@ class SARInferencer:
     def _bytes_to_mb(num_bytes: float) -> float:
         return float(num_bytes) / (1024 ** 2)
 
+    def _cuda_device_index(self) -> int:
+        """Return a concrete CUDA device index even when config uses plain 'cuda'."""
+        if self.device.type != "cuda":
+            raise ValueError("CUDA device index requested while running on non-CUDA device.")
+        if self.device.index is not None:
+            return int(self.device.index)
+        return int(torch.cuda.current_device())
+
     def _snapshot_vram(self) -> Optional[Dict[str, float]]:
         """Capture a detailed CUDA memory snapshot for the active device."""
         if self.device.type != "cuda" or not torch.cuda.is_available():
             return None
 
+        device_index = self._cuda_device_index()
         torch.cuda.synchronize()
-        try:
-            free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
-        except TypeError:
-            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
 
-        allocated = torch.cuda.memory_allocated(self.device)
-        reserved = torch.cuda.memory_reserved(self.device)
-        max_alloc = torch.cuda.max_memory_allocated(self.device)
-        max_reserved = torch.cuda.max_memory_reserved(self.device)
+        allocated = torch.cuda.memory_allocated(device_index)
+        reserved = torch.cuda.memory_reserved(device_index)
+        max_alloc = torch.cuda.max_memory_allocated(device_index)
+        max_reserved = torch.cuda.max_memory_reserved(device_index)
         used_driver = total_bytes - free_bytes
         return {
             "total_mb": self._bytes_to_mb(total_bytes),
@@ -226,7 +232,8 @@ class SARInferencer:
             logger.info("CUDA VRAM logging disabled because inference is running on CPU.")
             return
 
-        props = torch.cuda.get_device_properties(self.device)
+        device_index = self._cuda_device_index()
+        props = torch.cuda.get_device_properties(device_index)
         total_mb = self._bytes_to_mb(props.total_memory)
         logger.info(
             "CUDA device: %s | Capability: %d.%d | Total VRAM: %.1f MB | SMs: %d",
