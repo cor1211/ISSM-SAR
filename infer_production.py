@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import logging
 import sys
 import time
@@ -29,7 +30,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.transform import Affine
+from rasterio.warp import reproject, transform_bounds
 import torch
 import yaml
 from tqdm import tqdm
@@ -95,6 +98,7 @@ class SARInferencer:
             device_name = "cpu"
         self.device = torch.device(device_name)
         logger.info(f"Device: {self.device}")
+        self._log_device_overview()
 
         # ── normalisation params ──
         norm_cfg = config["normalization"]
@@ -108,12 +112,13 @@ class SARInferencer:
         self.overlap_frac: float = float(inf_cfg.get("overlap", 0.25))
         self.batch_size: int = int(inf_cfg.get("batch_size", 16))
         self.use_amp: bool = bool(inf_cfg.get("use_amp", True))
+        self.gaussian_blend: bool = bool(inf_cfg.get("gaussian_blend", True))
 
         self.overlap_px: int = int(self.patch_size * self.overlap_frac)
         self.stride: int = self.patch_size - self.overlap_px
         logger.info(
             f"Patch={self.patch_size}, overlap={self.overlap_px}px, "
-            f"stride={self.stride}, batch={self.batch_size}, AMP={self.use_amp}"
+            f"stride={self.stride}, batch={self.batch_size}, AMP={self.use_amp}, Blending={self.gaussian_blend}"
         )
 
         # ── load model architecture config ──
@@ -126,13 +131,21 @@ class SARInferencer:
         # ── initialise two models ──
         logger.info("Initialising VV model …")
         self.model_vv = self._load_model(model_cfg, config["ckpt_path_vv"])
+        self._log_model_footprint("VV", self.model_vv)
+        self._log_vram("After loading VV model")
         logger.info("Initialising VH model …")
         self.model_vh = self._load_model(model_cfg, config["ckpt_path_vh"])
+        self._log_model_footprint("VH", self.model_vh)
+        self._log_vram("After loading VH model")
 
-        # ── pre-compute gaussian window (on SR output scale = 2×patch) ──
+        # ── pre-compute blending window (on SR output scale = 2×patch) ──
         sr_patch = self.patch_size * 2
-        self.gaussian_window = self._create_gaussian_window(sr_patch).to(self.device)
-        logger.info(f"Gaussian blending window: {sr_patch}×{sr_patch}")
+        if self.gaussian_blend:
+            self.blend_window = self._create_gaussian_window(sr_patch).to(self.device)
+            logger.info(f"Gaussian blending window: {sr_patch}×{sr_patch}")
+        else:
+            self.blend_window = torch.ones((sr_patch, sr_patch), dtype=torch.float32, device=self.device)
+            logger.info(f"Simple averaging window (no Gaussian): {sr_patch}×{sr_patch}")
 
     # ----------------------------------------------------------
     #  Model loading
@@ -178,16 +191,105 @@ class SARInferencer:
     #  VRAM Logging
     # ----------------------------------------------------------
     @staticmethod
-    def _log_vram(stage: str) -> None:
-        """Log current GPU memory usage if CUDA is available."""
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / (1024 ** 2)
-            reserved = torch.cuda.memory_reserved() / (1024 ** 2)
-            max_alloc = torch.cuda.max_memory_allocated() / (1024 ** 2)
-            logger.info(
-                f"  [VRAM] {stage} | Allocated: {allocated:.1f} MB | "
-                f"Reserved: {reserved:.1f} MB | Peak: {max_alloc:.1f} MB"
+    def _bytes_to_mb(num_bytes: float) -> float:
+        return float(num_bytes) / (1024 ** 2)
+
+    def _snapshot_vram(self) -> Optional[Dict[str, float]]:
+        """Capture a detailed CUDA memory snapshot for the active device."""
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return None
+
+        torch.cuda.synchronize()
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(self.device)
+        except TypeError:
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+
+        allocated = torch.cuda.memory_allocated(self.device)
+        reserved = torch.cuda.memory_reserved(self.device)
+        max_alloc = torch.cuda.max_memory_allocated(self.device)
+        max_reserved = torch.cuda.max_memory_reserved(self.device)
+        used_driver = total_bytes - free_bytes
+        return {
+            "total_mb": self._bytes_to_mb(total_bytes),
+            "free_mb": self._bytes_to_mb(free_bytes),
+            "used_driver_mb": self._bytes_to_mb(used_driver),
+            "allocated_mb": self._bytes_to_mb(allocated),
+            "reserved_mb": self._bytes_to_mb(reserved),
+            "peak_allocated_mb": self._bytes_to_mb(max_alloc),
+            "peak_reserved_mb": self._bytes_to_mb(max_reserved),
+        }
+
+    def _log_device_overview(self) -> None:
+        """Log static GPU information once so VRAM planning is easier."""
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            logger.info("CUDA VRAM logging disabled because inference is running on CPU.")
+            return
+
+        props = torch.cuda.get_device_properties(self.device)
+        total_mb = self._bytes_to_mb(props.total_memory)
+        logger.info(
+            "CUDA device: %s | Capability: %d.%d | Total VRAM: %.1f MB | SMs: %d",
+            props.name,
+            props.major,
+            props.minor,
+            total_mb,
+            props.multi_processor_count,
+        )
+        self._log_vram("Startup")
+
+    def _log_model_footprint(self, label: str, model: torch.nn.Module) -> None:
+        """Log parameter/buffer footprint per model to estimate persistent VRAM."""
+        param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+        buffer_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
+        total_bytes = param_bytes + buffer_bytes
+        logger.info(
+            "  %s model footprint | Params: %.2f M | Param MB: %.1f | Buffer MB: %.1f | Total MB: %.1f",
+            label,
+            sum(p.numel() for p in model.parameters()) / 1e6,
+            self._bytes_to_mb(param_bytes),
+            self._bytes_to_mb(buffer_bytes),
+            self._bytes_to_mb(total_bytes),
+        )
+
+    def _log_vram(self, stage: str, baseline: Optional[Dict[str, float]] = None) -> Optional[Dict[str, float]]:
+        """Log current GPU memory usage, optionally including deltas from a baseline."""
+        stats = self._snapshot_vram()
+        if stats is None:
+            return None
+
+        line = (
+            f"  [VRAM] {stage} | Free: {stats['free_mb']:.1f} MB | "
+            f"Driver-used: {stats['used_driver_mb']:.1f} MB | Allocated: {stats['allocated_mb']:.1f} MB | "
+            f"Reserved: {stats['reserved_mb']:.1f} MB | Peak alloc: {stats['peak_allocated_mb']:.1f} MB | "
+            f"Peak reserved: {stats['peak_reserved_mb']:.1f} MB"
+        )
+        if baseline is not None:
+            line += (
+                f" | Delta alloc: {stats['allocated_mb'] - baseline['allocated_mb']:+.1f} MB"
+                f" | Delta reserved: {stats['reserved_mb'] - baseline['reserved_mb']:+.1f} MB"
             )
+        logger.info(line)
+        return stats
+
+    def _estimate_band_inference_memory(
+        self,
+        padded_h: int,
+        padded_w: int,
+        batch_len: int,
+        sr_patch_size: int,
+    ) -> None:
+        """Log rough memory sizing hints for one band inference pass."""
+        input_batch_bytes = 2 * batch_len * self.patch_size * self.patch_size * np.dtype(np.float32).itemsize
+        sr_batch_bytes = batch_len * sr_patch_size * sr_patch_size * np.dtype(np.float32).itemsize
+        cpu_acc_bytes = 2 * (padded_h * 2) * (padded_w * 2) * np.dtype(np.float32).itemsize
+        logger.info(
+            "  Memory hints | Batch input tensors: %.1f MB | SR batch output (CPU after forward): %.1f MB | "
+            "CPU accumulators: %.1f MB",
+            self._bytes_to_mb(input_batch_bytes),
+            self._bytes_to_mb(sr_batch_bytes),
+            self._bytes_to_mb(cpu_acc_bytes),
+        )
 
     # ----------------------------------------------------------
     #  Normalisation (dB ↔ [-1, 1])
@@ -321,6 +423,7 @@ class SARInferencer:
         model: ISSM_SAR,
         band_t1: np.ndarray,
         band_t2: np.ndarray,
+        label: str,
     ) -> np.ndarray:
         """Run sliding-window inference for a single polarisation band.
 
@@ -340,9 +443,10 @@ class SARInferencer:
         padded_h, padded_w = t1_pad.shape
 
         # ── output accumulators (SR space = 2×) ──
+        # FIX OOM: Move giant accumulators (can be up to 10-20GB for large TIFs) to CPU RAM instantly.
         sr_h, sr_w = padded_h * 2, padded_w * 2
-        output_acc = torch.zeros((sr_h, sr_w), dtype=torch.float32, device=self.device)
-        weight_acc = torch.zeros((sr_h, sr_w), dtype=torch.float32, device=self.device)
+        output_acc = torch.zeros((sr_h, sr_w), dtype=torch.float32, device="cpu")
+        weight_acc = torch.zeros((sr_h, sr_w), dtype=torch.float32, device="cpu")
 
         # ── generate patch coordinates ──
         coords = self._get_patch_coords(padded_h, padded_w)
@@ -350,9 +454,13 @@ class SARInferencer:
         logger.info(f"  Total patches: {total_patches}")
 
         sr_patch_size = self.patch_size * 2
-        gauss_win = self.gaussian_window  # (sr_patch_size, sr_patch_size)
+        blend_win = self.blend_window  # (sr_patch_size, sr_patch_size)
+        first_batch_len = min(self.batch_size, total_patches)
+        self._estimate_band_inference_memory(padded_h, padded_w, first_batch_len, sr_patch_size)
+        self._log_vram(f"{label} before patch loop")
 
         # ── batch inference ──
+        first_batch_logged = False
         for batch_start in tqdm(
             range(0, total_patches, self.batch_size),
             desc="  Inferring",
@@ -376,6 +484,14 @@ class SARInferencer:
             # Stack into batch tensors → (B, 1, H_patch, W_patch)
             inp_t1 = torch.cat(batch_t1, dim=0).to(self.device)
             inp_t2 = torch.cat(batch_t2, dim=0).to(self.device)
+            if not first_batch_logged:
+                logger.info(
+                    "  First batch tensors | T1=%s | T2=%s | dtype=%s",
+                    tuple(inp_t1.shape),
+                    tuple(inp_t2.shape),
+                    inp_t1.dtype,
+                )
+                self._log_vram(f"{label} after uploading first batch")
 
             # ── forward pass ──
             if self.use_amp and self.device.type == "cuda":
@@ -383,9 +499,16 @@ class SARInferencer:
                     sr_up, sr_down = model(inp_t1, inp_t2)
             else:
                 sr_up, sr_down = model(inp_t1, inp_t2)
+            if not first_batch_logged:
+                self._log_vram(f"{label} after first forward")
+                first_batch_logged = True
 
             # sr_fusion: average of last elements → (B, 1, 2*H_patch, 2*W_patch)
             sr_fusion = 0.5 * sr_up[-1] + 0.5 * sr_down[-1]
+            
+            # Move to CPU before accumulating to avoid massive VRAM usage
+            sr_fusion = sr_fusion.cpu()
+            blend_win_cpu = blend_win.cpu()
 
             # ── accumulate with gaussian weighting ──
             for idx, (y, x) in enumerate(batch_coords):
@@ -393,12 +516,14 @@ class SARInferencer:
                 out_y = y * 2
                 out_x = x * 2
                 output_acc[out_y : out_y + sr_patch_size, out_x : out_x + sr_patch_size] += (
-                    sr_patch * gauss_win
+                    sr_patch * blend_win_cpu
                 )
-                weight_acc[out_y : out_y + sr_patch_size, out_x : out_x + sr_patch_size] += gauss_win
+                weight_acc[out_y : out_y + sr_patch_size, out_x : out_x + sr_patch_size] += blend_win_cpu
 
             # Free GPU memory for this batch
             del inp_t1, inp_t2, sr_up, sr_down, sr_fusion
+
+        self._log_vram(f"{label} after patch loop")
 
         # ── normalise by accumulated weights ──
         # Avoid division by zero (shouldn't happen with proper tiling)
@@ -439,6 +564,378 @@ class SARInferencer:
                 f"CRS={src.crs}  |  dtype={src.dtypes[0]}"
             )
         return data, meta
+
+    @staticmethod
+    def _read_single_band_geotiff(path: str | Path) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Read a single-band GeoTIFF and return 2D data + metadata."""
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Input GeoTIFF not found: {path}")
+
+        with rasterio.open(path, "r") as src:
+            if src.count < 1:
+                raise ValueError(f"Raster has no readable bands: {path}")
+            data = src.read(1).astype(np.float32)
+            meta = src.profile.copy()
+            meta["descriptions"] = src.descriptions
+            meta["transform"] = src.transform
+            meta["crs"] = src.crs
+            meta["width"] = src.width
+            meta["height"] = src.height
+            logger.info(
+                f"  Read 1-band: {path.name}  |  shape={data.shape}  |  "
+                f"CRS={src.crs}  |  dtype={src.dtypes[0]}"
+            )
+        return data, meta
+
+    @staticmethod
+    def _resolve_resampling(name: str) -> Resampling:
+        """Map config string to rasterio Resampling enum."""
+        key = str(name or "bilinear").strip().lower()
+        mapping = {
+            "nearest": Resampling.nearest,
+            "bilinear": Resampling.bilinear,
+            "cubic": Resampling.cubic,
+            "average": Resampling.average,
+            "lanczos": Resampling.lanczos,
+        }
+        if key not in mapping:
+            raise ValueError(f"Unsupported resampling mode: {name}")
+        return mapping[key]
+
+    @staticmethod
+    def _same_grid(meta_a: Dict[str, Any], meta_b: Dict[str, Any]) -> bool:
+        """Check if two rasters share identical grid metadata."""
+        crs_a = meta_a.get("crs")
+        crs_b = meta_b.get("crs")
+        transform_a = meta_a.get("transform")
+        transform_b = meta_b.get("transform")
+        return (
+            crs_a == crs_b
+            and transform_a is not None
+            and transform_b is not None
+            and transform_a.almost_equals(transform_b)
+            and int(meta_a.get("width", 0)) == int(meta_b.get("width", 0))
+            and int(meta_a.get("height", 0)) == int(meta_b.get("height", 0))
+        )
+
+    def _align_single_band_to_reference(
+        self,
+        path: str | Path,
+        reference_meta: Dict[str, Any],
+        resampling: Resampling,
+    ) -> np.ndarray:
+        """Align a 1-band GeoTIFF to the reference grid."""
+        path = Path(path)
+        with rasterio.open(path, "r") as src:
+            if src.count < 1:
+                raise ValueError(f"Raster has no readable bands: {path}")
+            if src.crs is None:
+                raise ValueError(f"Raster missing CRS and cannot be aligned: {path}")
+
+            ref_crs = reference_meta.get("crs")
+            ref_transform = reference_meta.get("transform")
+            ref_width = int(reference_meta.get("width", 0))
+            ref_height = int(reference_meta.get("height", 0))
+            if ref_crs is None or ref_transform is None or ref_width < 1 or ref_height < 1:
+                raise ValueError("Reference grid is incomplete for alignment.")
+
+            if (
+                src.crs == ref_crs
+                and src.transform.almost_equals(ref_transform)
+                and src.width == ref_width
+                and src.height == ref_height
+            ):
+                return src.read(1).astype(np.float32)
+
+            dst_nodata = src.nodata if src.nodata is not None else np.nan
+            destination = np.full((ref_height, ref_width), dst_nodata, dtype=np.float32)
+            reproject(
+                source=rasterio.band(src, 1),
+                destination=destination,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                src_nodata=src.nodata,
+                dst_transform=ref_transform,
+                dst_crs=ref_crs,
+                dst_nodata=dst_nodata,
+                resampling=resampling,
+            )
+            logger.info(
+                f"  Aligned: {path.name} -> {ref_width}x{ref_height} on {ref_crs} using {resampling.name}"
+            )
+            return destination
+
+    @staticmethod
+    def _parse_target_resolution(value: Any) -> Optional[Tuple[float, float]]:
+        """Parse target resolution config into positive (xres, yres)."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            res = float(value)
+            if res <= 0:
+                raise ValueError(f"target_resolution must be > 0, got {value}")
+            return (res, res)
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            xres = float(value[0])
+            yres = float(value[1])
+            if xres <= 0 or yres <= 0:
+                raise ValueError(f"target_resolution values must be > 0, got {value}")
+            return (xres, yres)
+        raise ValueError(
+            "target_resolution must be null, a positive number, or a 2-item [xres, yres] list"
+        )
+
+    def _build_reference_meta_for_single_band_pair(
+        self,
+        ref_path: str | Path,
+        runtime_cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build the canonical reference grid for 4x1-band inference.
+
+        By default we preserve the native T1_VV grid. When target CRS / resolution
+        are provided, we reproject all four rasters onto that fixed grid instead.
+        """
+        ref_path = Path(ref_path)
+        with rasterio.open(ref_path, "r") as src:
+            if src.count < 1:
+                raise ValueError(f"Raster has no readable bands: {ref_path}")
+            if src.crs is None:
+                raise ValueError(f"Raster missing CRS and cannot define reference grid: {ref_path}")
+
+            native_meta = src.profile.copy()
+            native_meta["descriptions"] = ("VV", "VH")
+            native_meta["count"] = 2
+            native_meta["transform"] = src.transform
+            native_meta["crs"] = src.crs
+            native_meta["width"] = src.width
+            native_meta["height"] = src.height
+
+            target_crs_value = runtime_cfg.get("target_crs")
+            target_res_value = runtime_cfg.get("target_resolution")
+            if target_crs_value in (None, "", "native") and target_res_value is None:
+                return native_meta
+
+            target_crs = rasterio.crs.CRS.from_user_input(target_crs_value) if target_crs_value not in (None, "", "native") else src.crs
+            target_res = self._parse_target_resolution(target_res_value)
+            if target_res is None:
+                src_xres, src_yres = src.res
+                target_res = (abs(float(src_xres)), abs(float(src_yres)))
+
+            if target_crs == src.crs:
+                left, bottom, right, top = src.bounds
+            else:
+                left, bottom, right, top = transform_bounds(
+                    src.crs,
+                    target_crs,
+                    *src.bounds,
+                    densify_pts=21,
+                )
+
+            xres, yres = target_res
+            left = np.floor(left / xres) * xres
+            bottom = np.floor(bottom / yres) * yres
+            right = np.ceil(right / xres) * xres
+            top = np.ceil(top / yres) * yres
+            width = max(1, int(np.ceil((right - left) / xres)))
+            height = max(1, int(np.ceil((top - bottom) / yres)))
+            transform = Affine(xres, 0.0, left, 0.0, -yres, top)
+
+            reference_meta = native_meta.copy()
+            reference_meta["crs"] = target_crs
+            reference_meta["transform"] = transform
+            reference_meta["width"] = width
+            reference_meta["height"] = height
+            logger.info(
+                "  Canonical grid override: CRS=%s, res=(%.6f, %.6f), size=%dx%d",
+                target_crs,
+                xres,
+                yres,
+                width,
+                height,
+            )
+            return reference_meta
+
+    @staticmethod
+    def _find_band_idx(
+        meta: Dict[str, Any],
+        n_bands: int,
+        target_pol: str,
+        fallback_idx: int,
+        path: Path,
+    ) -> Optional[int]:
+        """Find band index by checking descriptions, else fall back safely."""
+        descs = meta.get("descriptions", [])
+
+        for i, desc in enumerate(descs):
+            if desc and target_pol.upper() in desc.upper():
+                return i
+
+        has_any_desc = any(d is not None for d in descs)
+        if not has_any_desc and n_bands >= 2 and fallback_idx < n_bands:
+            return fallback_idx
+
+        if not has_any_desc and n_bands == 1:
+            fname = path.name.lower()
+            if target_pol.lower() in fname:
+                return 0
+
+        return None
+
+    def _resolve_output_path(
+        self,
+        identifier: str,
+        explicit_path: Optional[str | Path] = None,
+    ) -> Path:
+        """Resolve final output path for a logical pair identifier."""
+        if explicit_path is not None:
+            out_path = Path(explicit_path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            return out_path
+
+        cfg_out = self.config["output"]
+        save_dir = Path(cfg_out["save_path"])
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        save_name = cfg_out.get("save_name")
+        if save_name:
+            return save_dir / str(save_name)
+
+        blend_suffix = "" if self.gaussian_blend else "_no_blend"
+        return save_dir / f"{identifier}_SR_x2{blend_suffix}.tif"
+
+    def _write_optional_staged_inputs(
+        self,
+        cache_dir: Optional[str | Path],
+        t1_stack: np.ndarray,
+        t2_stack: np.ndarray,
+        meta: Dict[str, Any],
+    ) -> Tuple[Optional[Path], Optional[Path]]:
+        """Optionally persist aligned 2-band inputs for debugging/reuse."""
+        if cache_dir is None:
+            return None, None
+
+        cache_root = Path(cache_dir)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        t1_path = cache_root / "t1_input.tif"
+        t2_path = cache_root / "t2_input.tif"
+        meta_cache = meta.copy()
+        meta_cache["descriptions"] = ("VV", "VH")
+        meta_cache["count"] = 2
+        self._write_geotiff(t1_path, t1_stack, meta_cache, meta_cache["transform"])
+        self._write_geotiff(t2_path, t2_stack, meta_cache, meta_cache["transform"])
+        return t1_path, t2_path
+
+    def _infer_pair_arrays(
+        self,
+        identifier: str,
+        data_t1: np.ndarray,
+        meta_t1: Dict[str, Any],
+        data_t2: np.ndarray,
+        meta_t2: Dict[str, Any],
+        out_path: str | Path,
+        require_both_polarizations: bool = False,
+    ) -> Path:
+        """Infer a single logical pair from already aligned multi-band arrays."""
+        if data_t1.shape[1:] != data_t2.shape[1:]:
+            raise ValueError(
+                f"Spatial shape mismatch for '{identifier}': {data_t1.shape[1:]} vs {data_t2.shape[1:]}"
+            )
+        if not self._same_grid(meta_t1, meta_t2):
+            raise ValueError(f"Input grids differ for '{identifier}'; align before inference.")
+
+        n_bands_t1, orig_h, orig_w = data_t1.shape
+        n_bands_t2 = data_t2.shape[0]
+        logger.info(f"  Image size: {orig_w}x{orig_h}, T1 bands={n_bands_t1}, T2 bands={n_bands_t2}")
+        self._log_vram("Before pair inference")
+
+        vv_idx_t1 = self._find_band_idx(meta_t1, n_bands_t1, "VV", 0, Path(f"{identifier}_t1.tif"))
+        vh_idx_t1 = self._find_band_idx(meta_t1, n_bands_t1, "VH", 1, Path(f"{identifier}_t1.tif"))
+        vv_idx_t2 = self._find_band_idx(meta_t2, n_bands_t2, "VV", 0, Path(f"{identifier}_t2.tif"))
+        vh_idx_t2 = self._find_band_idx(meta_t2, n_bands_t2, "VH", 1, Path(f"{identifier}_t2.tif"))
+
+        has_vv = vv_idx_t1 is not None and vv_idx_t2 is not None
+        has_vh = vh_idx_t1 is not None and vh_idx_t2 is not None
+
+        if require_both_polarizations and (not has_vv or not has_vh):
+            raise ValueError(f"Pair '{identifier}' is missing required VV/VH bands after alignment.")
+        if not has_vv and not has_vh:
+            raise ValueError(f"Pair '{identifier}' has no common valid bands (VV/VH).")
+
+        out_bands = []
+        out_descs = []
+
+        if has_vv:
+            logger.info("=" * 60)
+            logger.info("Step 2/5 - Inference: VV polarisation")
+            logger.info("=" * 60)
+            vv_t1 = data_t1[vv_idx_t1]
+            vv_t2 = data_t2[vv_idx_t2]
+            vv_t1_norm = self.normalize_db(vv_t1)
+            vv_t2_norm = self.normalize_db(vv_t2)
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            vv_baseline = self._log_vram("Before VV Inference")
+            sr_vv = self._infer_band(self.model_vv, vv_t1_norm, vv_t2_norm, label="VV")
+            self._log_vram("After VV Inference", baseline=vv_baseline)
+            sr_vv_db = self.denormalize_db(sr_vv)
+            logger.info(f"  VV SR dB range: [{sr_vv_db.min():.2f}, {sr_vv_db.max():.2f}]")
+            out_bands.append(sr_vv_db)
+            out_descs.append("SR_VV")
+        else:
+            logger.info("  [-] Skipping VV inference (band missing from one or both inputs)")
+
+        if has_vh:
+            logger.info("=" * 60)
+            logger.info("Step 3/5 - Inference: VH polarisation")
+            logger.info("=" * 60)
+            vh_t1 = data_t1[vh_idx_t1]
+            vh_t2 = data_t2[vh_idx_t2]
+            vh_t1_norm = self.normalize_db(vh_t1)
+            vh_t2_norm = self.normalize_db(vh_t2)
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            vh_baseline = self._log_vram("Before VH Inference")
+            sr_vh = self._infer_band(self.model_vh, vh_t1_norm, vh_t2_norm, label="VH")
+            self._log_vram("After VH Inference", baseline=vh_baseline)
+            sr_vh_db = self.denormalize_db(sr_vh)
+            logger.info(f"  VH SR dB range: [{sr_vh_db.min():.2f}, {sr_vh_db.max():.2f}]")
+            out_bands.append(sr_vh_db)
+            out_descs.append("SR_VH")
+        else:
+            logger.info("  [-] Skipping VH inference (band missing from one or both inputs)")
+
+        sr_output = np.stack(out_bands, axis=0)
+        src_transform: Affine = meta_t1["transform"]
+        sr_transform = Affine(
+            src_transform.a / 2.0,
+            src_transform.b,
+            src_transform.c,
+            src_transform.d,
+            src_transform.e / 2.0,
+            src_transform.f,
+        )
+
+        meta_out = meta_t1.copy()
+        meta_out["descriptions"] = tuple(out_descs)
+        meta_out["count"] = len(out_bands)
+        out_path = self._resolve_output_path(identifier, explicit_path=out_path)
+        cfg_out = self.config["output"]
+        self._write_geotiff(
+            out_path,
+            sr_output,
+            meta_out,
+            sr_transform,
+            compression=cfg_out.get("compression", "DEFLATE"),
+            tiled=cfg_out.get("tiled", True),
+            blockxsize=cfg_out.get("blockxsize", 256),
+            blockysize=cfg_out.get("blockysize", 256),
+        )
+        self._log_vram("After writing output")
+        logger.info(
+            f"  ✓ Output: {out_path} ({sr_output.shape[2]}x{sr_output.shape[1]}, {sr_output.shape[0]} bands)"
+        )
+        return out_path
 
     # ----------------------------------------------------------
     #  Write GeoTIFF
@@ -503,40 +1000,125 @@ class SARInferencer:
     @staticmethod
     def _scan_input_dir(
         input_dir: Path, t1_prefix: str, t2_prefix: str
-    ) -> List[Tuple[str, Path, Path]]:
-        """Scan directory and return matched pairs (identifier, t1_path, t2_path)."""
+    ) -> List[Dict[str, Any]]:
+        """Scan directory and return logical jobs for both 2-band and 4x1-band layouts."""
         if not input_dir.exists():
             raise FileNotFoundError(f"Input directory not found: {input_dir}")
-            
+
         all_files = list(input_dir.glob("*.tif")) + list(input_dir.glob("*.tiff"))
-        
-        t1_files: Dict[str, Path] = {}
-        t2_files: Dict[str, Path] = {}
-        
+        legacy_t1: Dict[str, Path] = {}
+        legacy_t2: Dict[str, Path] = {}
+        single_band_groups: Dict[str, Dict[str, Path]] = defaultdict(dict)
+        valid_pols = {"vv", "vh", "hh", "hv"}
+
         for f in all_files:
             name = f.stem
             if name.startswith(t1_prefix):
+                side = "t1"
                 iden = name[len(t1_prefix):]
-                t1_files[iden] = f
             elif name.startswith(t2_prefix):
+                side = "t2"
                 iden = name[len(t2_prefix):]
-                t2_files[iden] = f
-                
-        # Matching pairs
-        pairs = []
-        for iden, p1 in t1_files.items():
-            if iden in t2_files:
-                pairs.append((iden, p1, t2_files[iden]))
             else:
-                logger.warning(f"  [!] Missing T2: Found {p1.name} but no matching T2 for identifier '{iden}'")
-                
-        for iden, p2 in t2_files.items():
-            if iden not in t1_files:
-                logger.warning(f"  [!] Missing T1: Found {p2.name} but no matching T1 for identifier '{iden}'")
-                
-        # Sort for stable execution
-        pairs.sort(key=lambda x: x[0])
-        return pairs
+                continue
+
+            parts = iden.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].lower() in valid_pols:
+                pair_id, pol = parts[0], parts[1].lower()
+                single_band_groups[pair_id][f"{side}_{pol}"] = f
+            else:
+                if side == "t1":
+                    legacy_t1[iden] = f
+                else:
+                    legacy_t2[iden] = f
+
+        jobs: List[Dict[str, Any]] = []
+        for iden, t1_path in legacy_t1.items():
+            t2_path = legacy_t2.get(iden)
+            if t2_path is None:
+                logger.warning(f"  [!] Missing T2: Found {t1_path.name} but no matching T2 for identifier '{iden}'")
+                continue
+            jobs.append(
+                {
+                    "mode": "multiband",
+                    "identifier": iden,
+                    "t1_path": t1_path,
+                    "t2_path": t2_path,
+                }
+            )
+        for iden, t2_path in legacy_t2.items():
+            if iden not in legacy_t1:
+                logger.warning(f"  [!] Missing T1: Found {t2_path.name} but no matching T1 for identifier '{iden}'")
+
+        required_keys = {"t1_vv", "t1_vh", "t2_vv", "t2_vh"}
+        for iden, band_group in single_band_groups.items():
+            missing = sorted(required_keys - set(band_group.keys()))
+            if missing:
+                logger.warning(
+                    f"  [!] Incomplete 1-band pair for '{iden}': missing {', '.join(missing)}"
+                )
+                continue
+            jobs.append(
+                {
+                    "mode": "single-band",
+                    "identifier": iden,
+                    "t1_vv": band_group["t1_vv"],
+                    "t1_vh": band_group["t1_vh"],
+                    "t2_vv": band_group["t2_vv"],
+                    "t2_vh": band_group["t2_vh"],
+                }
+            )
+
+        jobs.sort(key=lambda x: (x["identifier"], x["mode"]))
+        return jobs
+
+    def run_pair_from_multiband_files(
+        self,
+        identifier: str,
+        t1_path: str | Path,
+        t2_path: str | Path,
+        out_path: Optional[str | Path] = None,
+    ) -> Path:
+        """Run inference for one legacy pair of 2-band GeoTIFFs."""
+        data_t1, meta_t1 = self._read_geotiff(t1_path)
+        data_t2, meta_t2 = self._read_geotiff(t2_path)
+        return self._infer_pair_arrays(identifier, data_t1, meta_t1, data_t2, meta_t2, out_path or None)
+
+    def run_pair_from_single_band_files(
+        self,
+        t1_vv: str | Path,
+        t1_vh: str | Path,
+        t2_vv: str | Path,
+        t2_vh: str | Path,
+        out_path: str | Path,
+        config: Optional[Dict[str, Any]] = None,
+        cache_dir: Optional[str | Path] = None,
+        identifier: Optional[str] = None,
+    ) -> Path:
+        """Align 4 single-band GeoTIFFs, optionally cache 2-band inputs, and infer one SR output."""
+        pair_id = identifier or Path(out_path).stem.replace("_SR_x2", "")
+        runtime_cfg = config or {}
+        resampling_name = runtime_cfg.get("resampling", "bilinear")
+        resampling = self._resolve_resampling(resampling_name)
+
+        ref_meta = self._build_reference_meta_for_single_band_pair(t1_vv, runtime_cfg)
+        t1_vv_arr = self._align_single_band_to_reference(t1_vv, ref_meta, resampling)
+        t1_vh_arr = self._align_single_band_to_reference(t1_vh, ref_meta, resampling)
+        t2_vv_arr = self._align_single_band_to_reference(t2_vv, ref_meta, resampling)
+        t2_vh_arr = self._align_single_band_to_reference(t2_vh, ref_meta, resampling)
+
+        t1_stack = np.stack([t1_vv_arr, t1_vh_arr], axis=0).astype(np.float32)
+        t2_stack = np.stack([t2_vv_arr, t2_vh_arr], axis=0).astype(np.float32)
+        self._write_optional_staged_inputs(cache_dir, t1_stack, t2_stack, ref_meta)
+        return self._infer_pair_arrays(
+            pair_id,
+            t1_stack,
+            ref_meta,
+            t2_stack,
+            ref_meta.copy(),
+            out_path,
+            require_both_polarizations=True,
+        )
 
     # ----------------------------------------------------------
     #  Main entry point
@@ -566,142 +1148,67 @@ class SARInferencer:
         save_dir = Path(cfg_out["save_path"])
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        compression = cfg_out.get("compression", "DEFLATE")
-        tiled = cfg_out.get("tiled", True)
-        blockxsize = cfg_out.get("blockxsize", 256)
-        blockysize = cfg_out.get("blockysize", 256)
-
         # ── 1. Scan inputs ──
         logger.info("=" * 60)
         logger.info(f"Scanning directory: {input_dir}")
         logger.info(f"Looking for prefixes: T1='{t1_prefix}', T2='{t2_prefix}'")
         logger.info("=" * 60)
-        
-        pairs = self._scan_input_dir(input_dir, t1_prefix, t2_prefix)
-        if not pairs:
-            logger.error("No valid T1/T2 pairs found. Please check filenames and directory.")
+
+        jobs = self._scan_input_dir(input_dir, t1_prefix, t2_prefix)
+        if not jobs:
+            logger.error("No valid logical pairs found. Please check filenames and directory.")
             return
-            
-        logger.info(f"==> Found {len(pairs)} perfect pairs for inference.")
-        
-        # ── Process each pair ──
-        for idx, (iden, t1_path, t2_path) in enumerate(pairs, 1):
+
+        logger.info(f"==> Found {len(jobs)} logical pairs for inference.")
+        self._log_vram("Before processing directory")
+        cache_aligned_inputs = bool(cfg_in.get("cache_aligned_inputs", False))
+        cache_root = cfg_in.get("cache_dir")
+        if cfg_out.get("save_name") and len(jobs) > 1:
+            logger.warning("output.save_name is set but multiple jobs were found; per-job default names will be used.")
+
+        ok_count = 0
+        for idx, job in enumerate(jobs, 1):
             t_start = time.time()
+            iden = job["identifier"]
             logger.info("=" * 60)
-            logger.info(f"Processing Pair {idx}/{len(pairs)}  |  Identifier: '{iden}'")
+            logger.info(f"Processing Pair {idx}/{len(jobs)}  |  Identifier: '{iden}'")
             logger.info("=" * 60)
+            try:
+                explicit_out = None
+                if cfg_out.get("save_name") and len(jobs) == 1:
+                    explicit_out = save_dir / str(cfg_out["save_name"])
 
-            data_t1, meta_t1 = self._read_geotiff(t1_path)
-            data_t2, meta_t2 = self._read_geotiff(t2_path)
+                if job["mode"] == "multiband":
+                    out_path = self.run_pair_from_multiband_files(
+                        iden,
+                        job["t1_path"],
+                        job["t2_path"],
+                        out_path=explicit_out,
+                    )
+                else:
+                    pair_cache_dir = None
+                    if cache_aligned_inputs:
+                        base_cache_root = Path(cache_root) if cache_root else save_dir / "_aligned_inputs"
+                        pair_cache_dir = base_cache_root / iden
+                    out_path = self.run_pair_from_single_band_files(
+                        t1_vv=job["t1_vv"],
+                        t1_vh=job["t1_vh"],
+                        t2_vv=job["t2_vv"],
+                        t2_vh=job["t2_vh"],
+                        out_path=explicit_out or self._resolve_output_path(iden),
+                        cache_dir=pair_cache_dir,
+                        identifier=iden,
+                    )
+                ok_count += 1
+                elapsed = time.time() - t_start
+                self._log_vram(f"After finishing '{iden}'")
+                logger.info(f"  ✓ Finished '{iden}' in {elapsed:.1f}s -> {out_path}")
+            except Exception as exc:
+                logger.error(f"  [!] Skipped '{iden}': {exc}")
 
-            # Validate shapes
-            if data_t1.shape != data_t2.shape:
-                logger.error(f"  [!] Skipped '{iden}': Shape mismatch {data_t1.shape} vs {data_t2.shape}")
-                continue
-            if data_t1.shape[0] < 2:
-                logger.error(f"  [!] Skipped '{iden}': Expected at least 2 bands (VV, VH), got {data_t1.shape[0]}")
-                continue
-
-            n_bands, orig_h, orig_w = data_t1.shape
-            logger.info(f"  Image size: {orig_w}×{orig_h}, bands={n_bands}")
-    
-            # Extract bands: Band 1 = VV, Band 2 = VH
-            vv_t1 = data_t1[0]  # (H, W)
-            vh_t1 = data_t1[1]  # (H, W)
-            vv_t2 = data_t2[0]
-            vh_t2 = data_t2[1]
-    
-            # ── 2. Normalise dB → [-1, 1] ──
-            logger.info("=" * 60)
-            logger.info("Step 2/5 — Normalising (dB → [-1, 1])")
-            logger.info("=" * 60)
-            vv_t1_norm = self.normalize_db(vv_t1)
-            vh_t1_norm = self.normalize_db(vh_t1)
-            vv_t2_norm = self.normalize_db(vv_t2)
-            vh_t2_norm = self.normalize_db(vh_t2)
-            logger.info(
-                f"  VV range after norm: [{vv_t1_norm.min():.4f}, {vv_t1_norm.max():.4f}]"
-            )
-            logger.info(
-                f"  VH range after norm: [{vh_t1_norm.min():.4f}, {vh_t1_norm.max():.4f}]"
-            )
-    
-            # ── 3. Infer VV ──
-            logger.info("=" * 60)
-            logger.info("Step 3/5 — Inference: VV polarisation")
-            logger.info("=" * 60)
-            
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
-                
-            sr_vv = self._infer_band(self.model_vv, vv_t1_norm, vv_t2_norm)
-            self._log_vram("After VV Inference")
-    
-            # ── 4. Infer VH ──
-            logger.info("=" * 60)
-            logger.info("Step 4/5 — Inference: VH polarisation")
-            logger.info("=" * 60)
-            
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
-                
-            sr_vh = self._infer_band(self.model_vh, vh_t1_norm, vh_t2_norm)
-            self._log_vram("After VH Inference")
-    
-            # ── 5. Denormalize & write output ──
-            logger.info("=" * 60)
-            logger.info("Step 5/5 — Denormalising & writing output")
-            logger.info("=" * 60)
-    
-            sr_vv_db = self.denormalize_db(sr_vv)
-            sr_vh_db = self.denormalize_db(sr_vh)
-            logger.info(
-                f"  VV SR dB range: [{sr_vv_db.min():.2f}, {sr_vv_db.max():.2f}]"
-            )
-            logger.info(
-                f"  VH SR dB range: [{sr_vh_db.min():.2f}, {sr_vh_db.max():.2f}]"
-            )
-    
-            # Stack → (2, 2H, 2W)
-            sr_output = np.stack([sr_vv_db, sr_vh_db], axis=0)
-    
-            # ── Update geospatial transform (pixel size ÷ 2) ──
-            src_transform: Affine = meta_t1["transform"]
-            sr_transform = Affine(
-                src_transform.a / 2.0,   # pixel width  (halved)
-                src_transform.b,
-                src_transform.c,         # top-left X
-                src_transform.d,
-                src_transform.e / 2.0,   # pixel height (halved, negative)
-                src_transform.f,         # top-left Y
-            )
-    
-            # ── output filename ──
-            # Naming format: <phiên_hiệu>_SR_x2.tif
-            out_name = f"{iden}_SR_x2.tif"
-            out_path = save_dir / out_name
-
-            self._write_geotiff(
-                out_path,
-                sr_output,
-                meta_t1,
-                sr_transform,
-                compression=compression,
-                tiled=tiled,
-                blockxsize=blockxsize,
-                blockysize=blockysize,
-            )
-
-            elapsed = time.time() - t_start
-            logger.info(f"  ✓ Finished '{iden}' in {elapsed:.1f}s")
-            logger.info(
-                f"  ✓ Output: {out_path} "
-                f"({sr_output.shape[2]}×{sr_output.shape[1]}, {sr_output.shape[0]} bands)"
-            )
-            
         total_time = time.time() - t_global_start
         logger.info("=" * 60)
-        logger.info(f"All {len(pairs)} pairs processed successfully in {total_time:.1f}s!")
+        logger.info(f"Processed {ok_count}/{len(jobs)} pairs successfully in {total_time:.1f}s!")
         logger.info("=" * 60)
 
 

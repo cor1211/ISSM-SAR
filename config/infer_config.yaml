@@ -27,16 +27,20 @@ inference:
   overlap: 0.25         # Fractional overlap between patches (0.0 - 0.5)
   batch_size: 16        # Number of patches per GPU batch
   use_amp: true         # Use torch.cuda.amp.autocast for FP16 inference
+  gaussian_blend: true  # If true, use Gaussian window for blending. If false, use simple averaging.
 
 # --- Input ---
 input:
-  input_dir: "data/input"      # Directory containing multiple T1 and T2 images
-  t1_prefix: "s1t1_"           # Prefix identifying T1 images (e.g., s1t1_E_48_44.tif)
-  t2_prefix: "s1t2_"           # Prefix identifying T2 images (e.g., s1t2_E_48_44.tif)
+  input_dir: "data/input"            # Directory containing multiple logical pairs
+  t1_prefix: "s1t1_"                # Prefix identifying T1 images
+  t2_prefix: "s1t2_"                # Prefix identifying T2 images
+  cache_aligned_inputs: false       # If true, persist aligned 2-band t1_input/t2_input when reading 4x1-band layout
+  cache_dir: null                   # Optional directory for aligned input cache
 
 # --- Output ---
 output:
   save_path: "data/output"             # Output directory
+  save_name: null                      # Optional fixed output filename when running exactly one pair
   compression: "DEFLATE"               # GeoTIFF compression (DEFLATE, LZW, ZSTD, NONE)
   tiled: true                          # Write tiled GeoTIFF for efficient random access
   blockxsize: 256                      # Tile width

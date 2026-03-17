@@ -1,25 +1,9 @@
-# =============================================================
-#  ISSM_SAR Production Inference — Docker Image
-# =============================================================
-#  Build:
-#    docker build -t issm-sar-infer .
-#
-#  Run (mount data + weights at runtime):
-#    docker run --gpus all --rm \
-#      -v /path/to/weights:/app/weights:ro \
-#      -v /path/to/input/A.tif:/app/data/input/s1t1.tif:ro \
-#      -v /path/to/input/A.tif:/app/data/input/s1t1.tif:ro \
-#      -v /path/to/output/:/app/data/output \
-#      issm-sar-infer \
-# =============================================================
-
 FROM pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
-# Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# System dependencies for rasterio (GDAL)
+# System packages required by rasterio/GDAL and compiled Python deps.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdal-bin \
     libgdal-dev \
@@ -27,22 +11,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Working directory
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies first for better layer caching.
 COPY requirements_prod.txt .
-RUN pip install --no-cache-dir -r requirements_prod.txt \
-    && pip install --no-cache-dir rasterio
+RUN pip install --no-cache-dir -r requirements_prod.txt
 
-# Copy source code
+# Copy only runtime code needed for the STAC->composite->infer pipeline.
 COPY src/ src/
 COPY config/ config/
 COPY infer_production.py .
+COPY query_stac_download.py .
+COPY sar_pipeline.py .
+COPY gee_compare_download.py .
+COPY gee_trainlike_download.py .
 
-# Create data directories (will be overridden by volume mounts)
-RUN mkdir -p weights data/input data/output
+# Default runtime directories. Real data/weights are expected to be mounted in.
+RUN mkdir -p weights data/input data/output runs geojson
 
-# Default entrypoint
-ENTRYPOINT ["python", "infer_production.py"]
-CMD ["--config", "config/infer_config.yaml"]
+# Default entrypoint exposes the full production pipeline.
+ENTRYPOINT ["python", "sar_pipeline.py"]
+CMD ["--help"]
