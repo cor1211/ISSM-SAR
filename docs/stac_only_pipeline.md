@@ -1,293 +1,135 @@
-# STAC-Only Pipeline Definition
+# STAC-Only Pipeline (Production Notes)
 
-## 1. Pham vi
+## 1. Dinh huong production
 
-Tai lieu nay chot lai 2 viec rieng:
+He thong production hien tai uu tien STAC-only, cu the:
 
-1. Thu nghiem da lam:
-   - mo rong `window time` tu `7 ngay` len `30 ngay`
-   - danh gia bang du lieu tai tu GEE de doi chieu domain
-2. Pipeline production can dung:
-   - **query, chon loc, download deu phai di qua STAC**
-   - khong phu thuoc GEE o khau lay du lieu dau vao production
+- workflow.mode = stac_trainlike_composite
 
-## 2. Ket luan tu thu nghiem GEE 30 ngay
+Muc tieu:
 
-Thu nghiem `anchor=midpoint`, windows:
+- giam phu thuoc GEE cho luong van hanh
+- xu ly du lieu dau vao on-site qua STAC + S3
+- tao input train-like bang local compositing
 
-- `S1T2 = [-30 days, anchor]`
-- `S1T1 = [anchor, +30 days]`
+## 2. Luong STAC-only end-to-end
 
-tren AOI `ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson` cho ket qua tot hon
-ban `7 ngay`.
+1. Query STAC items theo AOI + datetime
+2. Hard filter item (IW, GRD, VV/VH, asset hop le)
+3. Sinh support pairs va de xuat anchor
+4. Chon anchor theo ranking latest_input_datetime
+5. Tao pre/post windows quanh anchor
+6. Download scene trong windows (subset AOI)
+7. Warp tat ca ve grid chung
+8. nanmedian per-pol per-window
+9. focal median smoothing
+10. Tao s1t1/s1t2 composite 2-band
+11. Infer multiband
 
-Ket qua chinh:
+## 3. Cac cong thuc quan trong
 
-- `7 ngay`
-  - `T1 count = 2`
-  - `T2 count = 2`
-  - input corr: `VV 0.873`, `VH 0.865`
-  - output texture: `VV 0.338`, `VH 0.307`
-- `30 ngay`
-  - `T1 count = 6`
-  - `T2 count = 7`
-  - input corr: `VV 0.890`, `VH 0.880`
-  - output texture: `VV 0.330`, `VH 0.288`
+## 3.1 Coverage
 
-Y nghia:
+coverage = area(intersection(AOI_bbox, item_bbox)) / area(AOI_bbox)
 
-- cua so rong hon tao composite giau hon
-- speckle giam hon
-- output gan `reference_good` hon
+Mac dinh min_aoi_coverage = 1.0.
 
-Nhung day chi la **bang chung domain**, khong co nghia pipeline production se dung GEE.
+## 3.2 Support pair time gate cho anchor
 
-## 3. Dinh huong production da chot
+Trong train-like mode:
 
-Pipeline production phai la:
+- delta >= anchor_min_delta_hours (neu khong set thi fallback pairing.min_delta_hours)
+- delta <= window_before_days + window_after_days
 
-- dau vao: `1 AOI geojson`
-- query timeline: **STAC**
-- chon loc item: **STAC**
-- download scenes: **STAC**
-- composite / preprocess: **local**
-- infer: `infer_production.py`
+Luu y:
 
-Noi cach khac:
+- day la logic theo suggest_trainlike_anchors
+- pairing.max_delta_days la gate cua exact_pair, khong la tran chinh trong support pair cua train-like
 
-- GEE chi giu vai tro thu nghiem / benchmark
-- du lieu production phai di tu he thong STAC cua ban
+## 3.3 Window convention
 
-Gia dinh thiet ke:
+Voi anchor A:
 
-- khong xem sparse STAC hien tai la rao can dai han
-- pipeline production duoc thiet ke cho bo STAC se duoc cap day du hon trong tuong lai
-- vi vay logic selection/composite phai toi uu theo **timeline STAC day du**, khong phai theo bai toan khan item tam thoi
+- pre (S1T2): [A - before, A)
+- post (S1T1): [A, A + after]
 
-## 4. Tai sao exact pair STAC hien tai chua du
+## 3.4 Composite
 
-Exact pair STAC hien tai tot cho:
+Cho moi polarization:
 
-- xac dinh mốc thoi gian
-- kiem tra AOI coverage
-- tai raw pair de debug
+- C = nanmedian(scene_stack_aligned)
+- C_smooth = focal_median(C, radius_m)
 
-Nhung no chua tot cho model hien tai vi:
+## 4. Vi sao STAC-only van train-like
 
-- model da hoc tren domain `window composite + focal_median`
-- exact pair co speckle cao hon
-- exact pair co T1/T2 corr thap hon
+So voi exact raw pair:
 
-Vi vay pipeline production moi khong nen dung `1 cap exact pair` lam input cuoi.
-No nen dung `STAC timeline -> window scenes -> local composite`.
+- dung nhieu scene thay vi 1 scene
+- co trung vi theo window de on dinh noise
+- co focal median de giam speckle
+- dau ra 2-band giu dung expectation infer_production
 
-## 5. Pipeline production STAC-only da duoc implement
+## 5. So sanh voi nhom GEE tools
 
-### 5.1 Dau vao
+GEE tools:
 
-- `AOI geojson`
-- `datetime search range` lon hon, vi du:
-  - `2025-07-01/2025-09-10`
-- config query:
-  - `VV,VH`
-  - `IW`
-  - `GRD`
-  - `AOI bbox coverage = 1.0`
+- gee_compare_download.py
+- gee_trainlike_download.py
 
-### 5.2 Query STAC
+Vai tro:
 
-Query STAC tat ca item giao AOI, sau do hard filter:
+- benchmark, doi chieu, phan tich domain
 
-- `instrument_mode = IW`
-- `product_type = GRD`
-- co du `VV`, `VH`
-- moi polarization co asset raster doc duoc
-- `AOI bbox coverage = 1.0`
+Khong phai luong production chinh do:
 
-Day la tang selection dau vao timeline.
+- phu thuoc EE project/auth
+- khong phai data path van hanh chinh tai he thong STAC noi bo
 
-### 5.3 Suy ra `support pair` va `anchor`
+## 6. Config production de xuat
 
-Khi user khong co san `system_t1/system_t2`, pipeline phai tu suy ra noi bo:
+Tu config hien tai:
 
-1. sap xep cac item theo thoi gian
-2. sinh cac `support pair`
-3. lay `anchor = midpoint(t1, t2)`
-4. tim `latest_input_datetime` cua tung anchor candidate
-5. chon duy nhat 1 anchor sao cho du lieu dau vao moi nhat
+- mode: stac_trainlike_composite
+- window_before_days: 30
+- window_after_days: 30
+- min_scenes_per_window: 1
+- target_crs: EPSG:3857
+- target_resolution: 10
+- focal_median_radius_m: 15
+- min_aoi_coverage: 1.0
+- min_delta_hours: 24
 
-Voi production huong train-like, `support pair` khong phai input cuoi cua model.
-No chi la co so de dat `anchor`.
+## 7. Checklist truoc khi run
 
-Phan nay da duoc code trong:
+1. STAC service online, collection dung
+2. datetime range du rong
+3. AOI hop le
+4. S3 download truy cap duoc
+5. output dir co quyen ghi
+6. infer dependencies da cai
 
-- [query_stac_download.py](/mnt/data1tb/vinh/ISSM-SAR/query_stac_download.py)
-- `suggest-anchor`
-- va duoc `sar_pipeline.py` goi noi bo trong mode `stac_trainlike_composite`
+## 8. Monitoring sau khi run
 
-### 5.4 Tao 2 STAC windows
+Xem run_summary.json/md de check:
 
-Voi huong hien tai da cho ket qua tot nhat tren AOI `ffa6dc...`, uu tien:
+- anchor datetime
+- latest_input_datetime
+- pre/post scene counts
+- support pair delta
+- output path
 
-- `pre window = [anchor - 30 days, anchor]`
-- `post window = [anchor, anchor + 30 days]`
+Neu fail anchor:
 
-Theo quy uoc model:
+- mo rong datetime
+- giam min_scenes_per_window
+- xem lai same_orbit_direction
 
-- `S1T2 = pre window`
-- `S1T1 = post window`
+## 9. Lenh production mau
 
-### 5.5 Download scenes tu STAC
+```bash
+python sar_pipeline.py \
+  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
+  --mode stac_trainlike_composite \
+  --datetime 2025-07-01/2025-09-10
+```
 
-Thay vi download 1 pair, pipeline se download:
-
-- tat ca scene `VV`
-- tat ca scene `VH`
-
-trong tung window, neu scene do:
-
-- giao AOI
-- full AOI bbox coverage
-- dat hard filters
-
-Cach tai:
-
-- khong tai full item scene
-- moi asset deu duoc doc remote va cat truoc theo `bbox` chua AOI
-- `bbox` subset duoc snap outward theo pixel grid de bao kin AOI, tranh mat goc/canh
-- vi vay `window_raw/pre` va `window_raw/post` luon la cac file nho da cat, khong phai scene lon nguyen ban
-
-Day la diem khac biet cot loi so voi exact-pair pipeline hien tai.
-
-Phan nay da duoc code trong:
-
-- [sar_pipeline.py](/mnt/data1tb/vinh/ISSM-SAR/sar_pipeline.py)
-- thu muc run: `window_raw/pre`, `window_raw/post`
-
-### 5.6 Align va composite noi bo
-
-Tat ca raster tai tu STAC can duoc:
-
-1. warp / align ve cung grid chuan
-2. grid chuan nen giu:
-   - `EPSG:3857`
-   - `10m`
-   - extent theo `AOI bbox`
-3. tach theo 2 window:
-   - pre
-   - post
-4. composite theo tung polarization bang `median()`
-5. ap `focal_median(15m)`
-
-Sau buoc nay ta moi thu duoc:
-
-- `s1t1_<run>.tif`
-- `s1t2_<run>.tif`
-
-theo dung domain ma model can.
-
-Phan nay da duoc code trong:
-
-- [sar_pipeline.py](/mnt/data1tb/vinh/ISSM-SAR/sar_pipeline.py)
-- thu muc run: `composite/`
-
-### 5.7 Infer
-
-Sau composite:
-
-- dua `s1t1_*.tif`, `s1t2_*.tif` vao `infer_production.py`
-- output la `GeoTIFF 2-band SR`
-
-## 6. Khi khong co san `system_t1/system_t2`, phai lam sao?
-
-Cau tra loi da chot:
-
-- khong yeu cau user cung cap `system_t1/system_t2`
-- pipeline phai tu query STAC va sinh ra `support pair` / `anchor` noi bo
-
-Co nghia la:
-
-- `system_t1/system_t2` tro thanh **bien noi bo cua pipeline**
-- khong con la input bat buoc tu ben ngoai
-
-Hien tai phan sinh `anchor` da co trong:
-
-- [query_stac_download.py](/mnt/data1tb/vinh/ISSM-SAR/query_stac_download.py)
-- lenh `suggest-anchor`
-
-Lenh nay la mot phan cua STAC-only train-like pipeline.
-
-## 7. Lam sao de dam bao input cho model la tot nhat
-
-Voi model hien tai, muon input tot nhat thi can uu tien:
-
-1. khong infer truc tiep tren exact pair
-2. dung window composite
-3. dung `median()`
-4. dung `focal_median(15m)`
-5. giu `EPSG:3857`, `10m`
-6. dam bao `AOI bbox coverage = 1.0` cho moi scene duoc dua vao window
-7. uu tien `latest_input_datetime` moi nhat
-8. chi dung `min_scenes_per_window` lam nguong hop le toi thieu
-
-Tuc la:
-
-- chat luong model khong phu thuoc chi vao viec chon `1 pair`
-- no phu thuoc vao chat luong `window set` duoc tai ve va composite
-- nhung trong production uu tien khach hang, he thong van phai tra ve SR dua tren moc du lieu moi nhat co the
-
-## 8. Trang thai code hien tai
-
-Can tach ro 2 viec:
-
-- hien tai codebase da co:
-  - STAC exact pair query/download
-  - STAC anchor suggestion
-  - GEE train-like download de benchmark
-- STAC-only local composite branch da duoc implement trong:
-  - [sar_pipeline.py](/mnt/data1tb/vinh/ISSM-SAR/sar_pipeline.py)
-  - `workflow.mode = stac_trainlike_composite`
-
-Dieu da co:
-
-- logic de chon `anchor`
-- logic de download STAC assets
-- logic infer
-- local `median()` per polarization per window
-- local `focal_median(15m)`
-- ghi `s1t1/s1t2`
-- infer trong 1 lenh thong nhat
-
-## 9. Luong production nen chot
-
-Luong nen chot cho production:
-
-1. user dua `AOI geojson`
-2. query STAC mot khoang thoi gian du rong
-3. STAC chon `support pair`
-4. tu `support pair` suy ra `anchor = midpoint`
-5. tao `[-30, 0]` va `[0, +30]`
-6. download tat ca STAC scenes trong 2 windows
-7. local composite + local focal median
-8. tao `s1t1/s1t2`
-9. infer
-10. ghi `SR GeoTIFF`
-
-## 10. Y nghia cua GEE trong toan bo cau chuyen
-
-GEE van huu ich, nhung chi de:
-
-- benchmark domain
-- doi chieu voi train/test recipe
-- xac nhan rang `30-day window composite` co the tot hon `7-day`
-
-Con production chinh:
-
-- van phai la STAC-only
-
-## 11. File lien quan
-
-- query module: [query_stac_download.py](/mnt/data1tb/vinh/ISSM-SAR/query_stac_download.py)
-- query docs: [query_stac_download_module.md](/mnt/data1tb/vinh/ISSM-SAR/docs/query_stac_download_module.md)
-- GEE experiment docs: [gee_trainlike_download.md](/mnt/data1tb/vinh/ISSM-SAR/docs/gee_trainlike_download.md)
-- phase 1 analysis: [ffa6dc_phase1_ab.md](/mnt/data1tb/vinh/ISSM-SAR/docs/analysis/ffa6dc_phase1_ab.md)

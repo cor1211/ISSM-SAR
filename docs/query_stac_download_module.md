@@ -1,292 +1,265 @@
-# query_stac_download.py Module Guide
+# query_stac_download.py Module Guide (Code-Accurate)
 
-## 1. Module nay dung de lam gi?
+## 1. Muc tieu module
 
-`query_stac_download.py` dung de:
+query_stac_download.py cung cap tang STAC low-level de:
 
-- doc AOI tu `--geojson` hoac `--bbox`
-- query STAC Sentinel-1 GRD theo khong gian va thoi gian
-- loc item theo `IW`, `GRD`, polarization, orbit filter neu user muon
-- tim cap `T1/T2` phu hop cho bai toan multi-temporal SAR
-- de xuat `anchor` cho workflow `stac_trainlike_composite`
-- xuat manifest href tren S3/HTTP
-- download `4 file 1-band` theo format tu nhien cua STAC:
-  - `T1_VV`
-  - `T1_VH`
-  - `T2_VV`
-  - `T2_VH`
-- subset raster theo phan giao giua AOI bbox va item bounds
+- query item
+- hard-filter item
+- tim exact pairs
+- rank pairs
+- diagnose khi khong co pair
+- de xuat train-like anchors
+- tao manifest exact pair va trainlike anchor
 
-Module nay hien duoc thiet ke de lam tang query/download cho pipeline end-to-end.
+Module nay duoc dung truc tiep boi:
 
-## 2. Dau vao can co
+- sar_pipeline.py
+- gee_compare_download.py
 
-### 2.1 Bien moi truong
+## 2. Input, filter khong gian, thoi gian
 
-Doc tu `.env`:
+## 2.1 Spatial filter
 
-- `STAC_API_URL`: STAC API URL
-- `S3_ENDPOINT`: endpoint S3/MinIO
-- `S3_ACCESS_KEY`, `S3_SECRET_KEY`: credential
+Module ho tro:
 
-### 2.2 AOI
+- bbox
+- geojson intersects
 
-Module nhan 1 trong 2 kieu:
+Qua trinh:
 
-- `--geojson path/to/aoi.geojson`
-- `--bbox LON_MIN LAT_MIN LON_MAX LAT_MAX`
+1. resolve_spatial_filter lay bbox + intersects geometry
+2. STAC client query theo collection, datetime, limit
 
-Neu dung `--geojson`, script se:
+## 2.2 Hard filter item
 
-- doc geometry
-- tu tinh `bbox` neu file khong co san
-- query bang `intersects`
-- neu backend reject `intersects`, fallback sang `bbox`
+apply_hard_filters loai item neu vi pham:
 
-## 3. Hard filters tren item
-
-Item phai dat tat ca:
-
-- `sar:instrument_mode == IW`
-- `sar:product_type == GRD`
-- chua du polarization yeu cau trong `--pols`
-- moi polarization yeu cau phai co asset raster hop le
-
-Filter tuy chon:
-
-- `--orbit`: loc item theo `sat:orbit_state`
-- `--rel-orbit`: loc item theo `sat:relative_orbit`
-
-Hai filter nay chi loc item dau vao. Chung khong mac dinh chi phoi pairing.
-
-## 4. Thuat toan pairing hien tai
-
-### 4.1 Cach sinh candidate
-
-Sau hard filter, tat ca item duoc sap xep theo `properties.datetime`, roi so tung cap `i < j`.
-
-Mac dinh:
-
-- khong group theo orbit
-- khong group theo slice
-- khong bat buoc cung `relative_orbit`
-- khong bat buoc cung `datatake_id`
-
-Mode tuy chon:
-
-- `--same-orbit-direction`: chi chap nhan cap co `sat:orbit_state` giong nhau
-
-### 4.2 Dieu kien 1 cap hop le
-
-1 cap `T1/T2` duoc giu lai neu dat tat ca:
-
-- `min_delta_hours <= Delta_t <= max_delta_days`
-- `AOI_bbox_coverage_t1 >= min_aoi_coverage`
-- `AOI_bbox_coverage_t2 >= min_aoi_coverage`
-
-Trong do:
-
-- `Delta_t`: chenh lech thoi gian giua `properties.datetime` cua `T1` va `T2`
-- `AOI_bbox_coverage_t1`, `AOI_bbox_coverage_t2`:
-  `intersection(AOI bbox, item bbox) / area(AOI bbox)`
+- instrument_mode != IW
+- product_type != GRD
+- thieu polarization bat buoc (VV/VH)
+- khong co href doc duoc cho polarization can dung
+- neu co orbit_state filter thi phai match
+- neu co relative_orbit filter thi phai match
 
 Y nghia:
 
-- vi input vao model cuoi cung la 1 anh hinh chu nhat, dung `AOI bbox coverage` se dam bao ca `T1` va `T2` deu bao tron vung chu nhat ma model thuc su nhin thay
-- day la ly do module hien tai van giu coverage theo bbox, khong doi sang polygon coverage
+- Day la hard gate truoc khi vao bai toan pair/anchor
 
-### 4.3 `bbox_overlap` dung de lam gi?
+## 3. Cong thuc hinh hoc va metric
 
-`bbox_overlap` hien **khong con la hard filter**.
+## 3.1 bbox_intersection
 
-No chi duoc dung cho:
+inter(b1, b2) = dien tich giao nhau cua 2 bbox.
 
-- report
-- diagnostic
-- tie-break ranking khi 2 cap co `Delta_t` giong nhau
+## 3.2 bbox_area
 
-Cong thuc:
+area(b) = (maxx - minx) * (maxy - miny), co clamp >= 0.
 
-- `intersection(item_bbox_1, item_bbox_2) / min(area1, area2)`
+## 3.3 bbox_overlap_ratio
 
-### 4.4 Ranking
+overlap = inter(bbox1, bbox2) / min(area1, area2)
 
-Cap hop le duoc sort theo uu tien moi nhat:
+Neu khong giao nhau thi overlap = 0.
 
-1. `latest_input_datetime` moi nhat
-2. `T1` moi nhat
-3. `Delta_t` nho hon
-4. `bbox_overlap` lon hon
-5. `T1 ID`, `T2 ID` on dinh de tranh random
+## 3.4 coverage_ratio
 
-Voi `exact pair`, `latest_input_datetime` chinh la `T2 datetime`, vi `T2` la anh muon hon trong cap.
+coverage = inter(reference_bbox, item_bbox) / area(reference_bbox)
 
-Y nghia:
+Trong pipeline hien tai, reference_bbox thuong la AOI bbox.
 
-- khi he thong nhan 1 AOI moi tu khach hang, cap duoc chon se uu tien gan hien tai nhat
-- `bbox_overlap` khong duoc phep day 1 cap cu hon len tren 1 cap moi hon
-- `Delta_t` van quan trong, nhung chi dung de tie-break trong nhom cap da gan hien tai nhat
+## 4. Tim exact pairs
 
-## 5. Default pairing hien tai
+## 4.1 Dieu kien pair hop le trong find_pairs
 
-Mac dinh moi:
+Voi sorted items theo datetime, pair (i, j), i < j:
 
-- `--pols VV,VH`
-- `--min-aoi-coverage 1.0`
-- `--min-delta-hours 24`
-- `--max-delta-days 10`
-- `--same-orbit-direction` tat
+1. Neu same_orbit_direction = true:
+   orbit_state(i) va orbit_state(j) phai bang nhau
+2. delta_sec = t_j - t_i
+3. delta_sec >= min_delta_hours * 3600
+4. delta_sec <= max_delta_days * 86400
+5. coverage_t1 >= min_aoi_coverage
+6. coverage_t2 >= min_aoi_coverage
 
-`--min-overlap` van con tren CLI de tuong thich nguoc, nhung hien chi la tham so diagnostic/ranking, khong con loai pair.
+Luu y:
 
-## 6. Auto-relax hoat dong the nao?
+- Neu delta_sec > max_delta_sec thi break inner loop (vi list da sort theo time)
+- overlap duoc ghi lai, khong phai hard filter
+- min_overlap duoc truyen qua API, nhung trong find_pairs hien tai khong su dung de cat pair
 
-Lenh `prepare` va `download-generated-pairs` co the bat `--auto-relax`.
+## 4.2 Ranking pair
 
-Script thu lan luot:
+pair_rank_key:
 
-- `strict`: dung threshold user truyen
-- `balanced`: giu `min_aoi_coverage`, doi `max_delta_days = 30`
-- `loose`: giu `min_aoi_coverage`, doi `max_delta_days = 90`
+1. t2 moi nhat
+2. t1 moi nhat
+3. delta_seconds nho hon
+4. bbox_overlap lon hon
+5. t1_id, t2_id
 
-Hai diem quan trong:
+search_pairs_sorted = find_pairs + sorted(pair_rank_key)
 
-- `min_delta_hours` duoc giu nguyen
-- `min_aoi_coverage` khong bi ha xuong duoi gia tri user truyen
-- `bbox_overlap` van chi la diagnostic/ranking
+## 4.3 Chan doan khong co pair
 
-## 7. Download dang tai cai gi?
+diagnose_no_pair thong ke:
 
-Mac dinh script khong tai full scene.
+- item_count
+- total pair duyet
+- pair fail do orbit direction
+- pair fail do min time
+- pair fail do max time
+- pair fail do coverage
 
-No se:
+Tra ve reason chinh:
 
-- mo remote raster tren S3/HTTP bang rasterio
-- doi AOI geometry sang CRS raster
-- lay `bbox giao nhau giua AOI va item bounds`
-- snap outward theo pixel grid de khong bi hut goc
-- ghi ra file subset
+- INSUFFICIENT_ITEMS
+- NO_PAIR_WITH_ORBIT_DIRECTION
+- ONLY_SAME_DATATAKE_CANDIDATES
+- NO_PAIR_WITH_MIN_TIME_GAP
+- NO_PAIR_WITH_MAX_TIME_WINDOW
+- NO_PAIR_WITH_FULL_AOI_COVERAGE
+- NO_VALID_PAIR
 
-Ket qua cho pipeline la `4 file 1-band`:
+Dong thoi tao best_relaxed (nhe dieu kien) de debug.
 
-- `s1t1_<pair_id>_vv.tif`
-- `s1t1_<pair_id>_vh.tif`
-- `s1t2_<pair_id>_vv.tif`
-- `s1t2_<pair_id>_vh.tif`
+## 5. Anchor de xuat cho train-like
 
-Neu muon tai nguyen full item:
+## 5.1 Y tuong
 
-- them `--full-item`
+support pair -> midpoint -> anchor candidate -> danh gia pre/post windows -> rank.
 
-## 8. Quan he voi infer_production.py
+## 5.2 Window definition
 
-Tang query/download va tang infer hien duoc tach ro:
+Voi anchor = A:
 
-- `query_stac_download.py` tao `4 file raw 1-band`
-- `infer_production.py` nay da duoc refactor de co the nhan truc tiep 4 file nay
-- infer se tu align/resample ve cung 1 luoi tham chieu, roi moi chay model
+- pre: [A - window_before_days, A)
+- post: [A, A + window_after_days]
 
-Neu bat cache staging, infer co the ghi them:
+collect_anchor_window_items giu item khi:
 
-- `t1_input.tif` gom 2 bands `VV,VH`
-- `t2_input.tif` gom 2 bands `VV,VH`
+- coverage(AOI, item) >= min_aoi_coverage
+- datetime nam trong pre hoac post
 
-Sau cung output la:
+## 5.3 Dieu kien support pair trong suggest_trainlike_anchors
 
-- `1 GeoTIFF 2-band` gom `SR_VV`, `SR_VH`
+Support pair dat khi:
 
-## 9. Cac lenh chinh
+- delta >= min_delta_hours
+- delta <= (window_before_days + window_after_days)
+- coverage_t1, coverage_t2 >= min_aoi_coverage
+- same_orbit_direction (neu bat)
 
-### 9.1 Liet ke item
+Luu y mapping tham so:
 
-```bash
-python query_stac_download.py list \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson
+- min_delta_hours o ham nay la gia tri caller truyen vao.
+- Trong sar_pipeline train-like, gia tri do duoc lay tu trainlike.anchor_min_delta_hours,
+  neu khong co thi fallback pairing.min_delta_hours.
+
+Luu y quan trong:
+
+- O day khong dung pairing.max_delta_days.
+- Tran tren support gap duoc tinh theo tong do dai 2 windows.
+
+## 5.4 Dedupe scene
+
+summarize_unique_scenes dung scene key:
+
+- (datetime, platform, orbit_state, relative_orbit, slice_number)
+
+Muc tieu:
+
+- tranh mot acquisition dong gop nhieu lan cho cung window.
+
+## 5.5 Dieu kien anchor candidate hop le
+
+Sau dedupe:
+
+- len(pre_scenes) >= min_scenes_per_window
+- len(post_scenes) >= min_scenes_per_window
+
+## 5.6 Ranking anchor
+
+anchor_rank_key uu tien:
+
+1. post_latest_scene_datetime moi nhat
+2. anchor_datetime moi nhat
+3. support_t2_datetime moi nhat
+4. pre_latest_scene_datetime moi nhat
+5. support_pair_delta_seconds nho hon
+6. support_t1_id, support_t2_id
+
+## 6. Manifest formats
+
+## 6.1 Exact pair manifest
+
+build_manifest_for_pair tao thong tin:
+
+- pair_id
+- t1/t2 id, datetime
+- delta_seconds/hours/days
+- orbit, relative_orbit, slice
+- bbox_overlap
+- aoi_bbox_coverage_t1/t2
+- assets href cho moi pol (VV, VH)
+
+## 6.2 Trainlike anchor manifest
+
+build_trainlike_anchor_manifest tao:
+
+- manifest_type = trainlike_anchor
+- anchor_source = stac_midpoint_pair
+- anchor_datetime
+- window_before_days, window_after_days
+- required_polarizations
+- pre/post scene lists
+- latest_input_datetime = post_latest_scene_datetime
+- support pair metadata (t1/t2, delta)
+
+## 7. CLI chinh cua module
+
+Script query_stac_download.py co cac command de:
+
+- query + inspect items
+- tim pair + report
+- suggest anchor
+- tao manifest
+- download theo manifest
+
+Nen dung khi can debug source STAC doc lap voi pipeline chinh.
+
+## 8. Ghi chu thuc te
+
+1. min_overlap hien la diagnostic metric, khong phai hard filter trong find_pairs.
+2. strict_slice duoc truyen qua call stack, nhung logic hard-filter slice trong find_pairs hien tai khong duoc apply.
+3. Coverage duoc tinh tren bbox, khong tinh tren polygon AOI chi tiet.
+4. Pair overlap va AOI coverage la 2 metric khac nhau, khong thay the nhau.
+
+## 9. Pseudo-code tong hop
+
+```text
+items = STAC.search(...)
+items = apply_hard_filters(items)
+
+# exact pair
+pairs = find_pairs(items,
+  min_delta_hours,
+  max_delta_days,
+  min_aoi_coverage,
+  same_orbit_direction)
+pairs = sort(pair_rank_key)
+
+# trainlike anchor
+candidates = []
+for support_pair in item_pairs:
+  if support_pair passes min_delta, max_support_gap, coverage, orbit:
+    anchor = midpoint(t1, t2)
+    pre, post = collect_window_items(anchor)
+    pre = dedupe(pre)
+    post = dedupe(post)
+    if len(pre) >= min_scenes and len(post) >= min_scenes:
+      candidates.append(anchor_candidate)
+
+candidates = sort(anchor_rank_key)
 ```
 
-### 9.2 Liet ke pair hop le
-
-```bash
-python query_stac_download.py pair \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson
-```
-
-Voi default moi, AOI nay se cho 1 pair strict hop le vi:
-
-- `Delta_t ~ 2.51 days`
-- `AOI bbox coverage T1 = 1.0`
-- `AOI bbox coverage T2 = 1.0`
-- `bbox_overlap ~ 0.683` chi la diagnostic, khong con chan pair
-
-### 9.3 Chon cap tot nhat va download raw inputs
-
-```bash
-python query_stac_download.py prepare \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --download \
-  --out-dir data/input
-```
-
-### 9.4 Batch pair download
-
-```bash
-python query_stac_download.py download-generated-pairs \
-  --geojson-dir geojson/generated_aoi \
-  --dry-run
-```
-
-### 9.5 De xuat anchor cho pipeline train-like
-
-Khi can suy ra `anchor` tu STAC timeline, co the dung:
-
-```bash
-python query_stac_download.py suggest-anchor \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --datetime 2025-07-01/2025-09-10 \
-  --window-before-days 30 \
-  --window-after-days 30 \
-  --min-scenes-per-window 1 \
-  --save-manifest runs/anchor_manifests/ffa6dc_anchor_30d.json
-```
-
-Lenh nay:
-
-- van query STAC theo AOI nhu cu
-- loc item full AOI + du polarization
-- dung midpoint cua cac support pair lam anchor candidates
-- xep hang theo `latest_input_datetime` moi nhat
-- chi dung `min_scenes_per_window` nhu nguong hop le toi thieu, khong phai muc tieu toi uu chinh
-- xuat `anchor manifest`
-
-Mac dinh production hien tai:
-
-- `window_before_days = 30`
-- `window_after_days = 30`
-- `min_scenes_per_window = 1`
-
-`anchor manifest` se chua:
-
-- `anchor_datetime`
-- `latest_input_datetime`
-- `window_before_days`, `window_after_days`
-- `support_t1/t2`
-- `pre_scenes`, `post_scenes`
-- `aoi_bbox`
-
-Ghi chu:
-
-- `latest_input_datetime` la moc du lieu moi nhat ma pipeline uu tien de tra SR cho khach hang
-- `anchor_datetime` la moc noi bo de chia 2 window train-like, khong phai tieu chi xep hang chinh
-- hien tai manifest nay duoc `sar_pipeline.py` dung truc tiep cho workflow `stac_trainlike_composite`
-- voi huong production moi, cung logic `anchor` nay duoc `sar_pipeline.py` goi noi bo trong mode `stac_trainlike_composite` de tai **window scenes tren STAC** va composite local
-
-## 10. Report co gi moi?
-
-Report pair hien tai ghi ro:
-
-- run config day du
-- `Delta exact`, `Delta hours`, `Delta days`
-- `AOI bbox coverage T1/T2/min`
-- `bbox_overlap` voi vai tro diagnostic
-- orbit direction, relative orbit, slice, datatake
-- no-pair reason va thong ke diagnostic

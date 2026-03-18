@@ -1,237 +1,310 @@
-# `sar_pipeline.py` Guide
+# sar_pipeline.py Guide (Code-Accurate)
 
 ## 1. Muc tieu
 
-`sar_pipeline.py` la wrapper end-to-end cho 2 workflow:
+sar_pipeline.py la wrapper end-to-end cho 2 workflow:
 
-- `exact_pair`
-- `stac_trainlike_composite`
+- exact_pair
+- stac_trainlike_composite
 
-Workflow production hien tai duoc uu tien la:
+Gia tri mac dinh trong config hien tai:
 
-- `stac_trainlike_composite`
+- workflow.mode = stac_trainlike_composite (xem config/pipeline_config.yaml)
 
-vi no bam sat hon domain ma model hien tai can:
+Luon tham chieu code chinh:
 
-- timeline multi-scene
-- local median composite
-- local focal median
-- output `s1t1/s1t2` 2-band roi moi infer
+- sar_pipeline.py
+- query_stac_download.py
 
-## 2. Hai workflow hien co
+## 2. Tong quan 2 workflow
 
-### 2.1 `exact_pair`
+### 2.1 exact_pair
 
-Luong cu:
+Muc tieu: tim 1 cap T1/T2 hop le de infer truc tiep.
 
-1. query STAC
-2. chon 1 cap exact `T1/T2`
-3. download `4 file 1-band`
-4. align
-5. infer
+Luong xu ly:
 
-Workflow nay van duoc giu de:
+1. Query STAC + hard filter item
+2. Tim pair theo rang buoc thoi gian, coverage, orbit (tuy chon)
+3. Chon pair top-1 theo ranking recency
+4. Download 4 file 1-band: t1_vv, t1_vh, t2_vv, t2_vh
+5. Align/staging theo infer_production
+6. Infer
 
-- debug
-- so sanh
-- kiem tra pair selection
+### 2.2 stac_trainlike_composite
 
-Nhung no khong phai workflow toi uu cho model hien tai.
+Muc tieu: tao input train-like tu STAC timeline (multi-scene compositing), sau do infer.
 
-### 2.2 `stac_trainlike_composite`
+Luong xu ly:
 
-Luong production moi:
+1. Query STAC + hard filter item
+2. Sinh support pairs de de xuat anchor
+3. Chon 1 anchor theo ranking recency
+4. Tao 2 cua so thoi gian quanh anchor: pre/post
+5. Download nhieu scene trong moi window
+6. Warp ve 1 grid chung
+7. Composite per-pol = nanmedian(scene stack)
+8. Focal median smoothing
+9. Ghi 2-band t1/t2 composite
+10. Infer multiband
 
-1. query STAC timeline
-2. de xuat `anchor`
-3. tao `pre/post windows`
-4. download nhieu STAC scenes trong 2 windows
-5. align ve cung grid `EPSG:3857`, `10m`, `AOI bbox`
-6. local `median()` per polarization per window
-7. local `focal_median(15m)`
-8. tao:
-   - `s1t1_<anchor_id>.tif`
-   - `s1t2_<anchor_id>.tif`
-9. infer
+Luu y quan trong:
 
-Day la workflow mac dinh moi trong
-[pipeline_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/pipeline_config.yaml).
+- Mode stac_trainlike_composite KHONG goi nhanh select_best_pair cua exact_pair.
+- No tuong tac truc tiep voi suggest_trainlike_anchors.
 
-## 3. Dau vao
+## 3. Hard filters va cong thuc co ban
 
-- `AOI geojson`
-- `config/pipeline_config.yaml`
-- `config/infer_config.yaml`
+## 3.1 Hard filter item (ap dung truoc khi pairing)
 
-Vi du AOI:
+Hard filters duoc ap trong query_stac_download.py:
 
-- [ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson](/mnt/data1tb/vinh/ISSM-SAR/geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson)
+- instrument_mode = IW
+- product_type = GRD
+- item co du polarization bat buoc (mac dinh VV,VH)
+- item co asset href hop le cho cac polarization can dung
+- neu config co orbit/rel_orbit thi phai match
 
-## 4. Logic STAC-only production
+## 3.2 Cong thuc coverage va overlap
 
-### 4.1 Query timeline
+Cho 2 bbox:
 
-Pipeline goi lai tang query tu
-[query_stac_download.py](/mnt/data1tb/vinh/ISSM-SAR/query_stac_download.py):
+- inter = dien tich giao nhau
+- area(b) = dien tich bbox
 
-- `intersects` theo AOI
-- hard filters:
-  - `IW`
-  - `GRD`
-  - du `VV,VH`
-  - asset raster doc duoc
-  - `AOI bbox coverage = 1.0`
+Cong thuc:
 
-### 4.2 Chon `anchor`
-
-Pipeline khong can user dua san `system_t1/system_t2`.
-
-No tu:
-
-1. sinh `support pairs` tren STAC timeline
-2. lay `midpoint(t1, t2)` lam `anchor candidate`
-3. tim `latest_input_datetime` cua tung candidate, tuong ung scene moi nhat trong `post window`
-4. chon duy nhat 1 `anchor` uu tien moi nhat
-
-Ranking uu tien:
-
-1. `latest_input_datetime` moi nhat
-2. `anchor_datetime` moi nhat
-3. `support_t2` moi nhat
-4. `pre_latest_scene_datetime` moi nhat
-5. `support pair gap` nho hon
-
-`scene count` khong con la tieu chi rank chinh.
-No chi la dieu kien toi thieu de candidate duoc xem la hop le.
-
-### 4.3 Tao window
-
-Mac dinh production hien tai:
-
-- `window_before_days = 30`
-- `window_after_days = 30`
-
-Theo quy uoc model:
-
-- `S1T2 = [anchor - 30d, anchor]`
-- `S1T1 = [anchor, anchor + 30d]`
-
-### 4.4 Download scenes
-
-Pipeline download tat ca scene STAC thuoc `pre/post windows`:
-
-- theo tung polarization `VV`, `VH`
-- subset theo AOI bbox
-- luu vao:
-  - `window_raw/pre`
-  - `window_raw/post`
+- AOI coverage:
+  C = inter(AOI_bbox, item_bbox) / area(AOI_bbox)
+- Pair overlap (diagnostic):
+  O = inter(bbox_t1, bbox_t2) / min(area(bbox_t1), area(bbox_t2))
 
 Luu y:
 
-- pipeline khong tai full item scene trong mode production nay
-- moi asset duoc cat truoc theo `bbox` chua AOI roi moi luu local
-- subset window duoc snap outward theo pixel grid de dam bao bao kin AOI
+- min_aoi_coverage la hard filter
+- min_overlap hien khong phai hard filter trong find_pairs, chi duoc luu de report/ranking
 
-Scene duplicate cung acquisition duoc dedupe de tranh 1 timestamp dong gop nhieu lan.
+## 4. Exact pair: dieu kien, ranking, fallback
 
-### 4.5 Align + composite
+## 4.1 Dieu kien pair hop le
 
-Tat ca raster duoc warp ve 1 grid chuan:
+Cap (t1, t2) voi t2 muon hon t1 duoc giu neu:
 
-- `CRS = EPSG:3857`
-- `resolution = 10m`
-- extent = `AOI bbox`
+- min_delta_hours <= delta_time <= max_delta_days
+- coverage_t1 >= min_aoi_coverage
+- coverage_t2 >= min_aoi_coverage
+- neu same_orbit_direction = true thi orbit_state(t1) phai bang orbit_state(t2)
 
-Sau do:
+Quy doi thoi gian trong code:
 
-- `nanmedian()` qua scene stack cho moi polarization
-- `focal_median(15m)` voi circular footprint
+- min_delta_sec = min_delta_hours * 3600
+- max_delta_sec = max_delta_days * 86400
 
-Ket qua:
+## 4.2 Ranking exact pair
 
-- `composite/s1t1_<anchor_id>.tif`
-- `composite/s1t2_<anchor_id>.tif`
+pair_rank_key:
 
-Moi file co:
+1. t2_datetime moi nhat
+2. t1_datetime moi nhat
+3. delta_seconds nho hon
+4. bbox_overlap lon hon
+5. t1_id, t2_id de on dinh thu tu
 
-- 2 bands
-- `S1_VV`
-- `S1_VH`
+## 4.3 Auto relax
 
-### 4.6 Infer
+Neu khong tim thay strict pair va pairing.auto_relax = true:
 
-Pipeline dua 2 file composite vao
-[infer_production.py](/mnt/data1tb/vinh/ISSM-SAR/infer_production.py)
-qua nhanh `multiband`.
+- thu lai voi max_delta_days = 30 (balanced)
+- neu van khong co, thu max_delta_days = 90 (loose)
+
+Neu auto_relax = false:
+
+- fail ngay voi thong bao chan doan reason tu diagnose_no_pair
+
+## 5. Train-like composite: anchor logic dung theo code
+
+## 5.1 Support pair cho anchor
+
+Trong suggest_trainlike_anchors:
+
+- support pair van phai dat anchor_min_delta_hours (fallback pairing.min_delta_hours), min_aoi_coverage, same_orbit_direction (neu bat)
+- Gioi han support gap:
+  delta_sec <= (window_before_days + window_after_days) * 86400
+
+Luu y:
+
+- O mode nay, pairing.max_delta_days KHONG duoc dung de cat support pair.
+- Gioi han duoc rang buoc boi tong do rong cua 2 windows quanh anchor.
+
+## 5.2 Anchor candidate
+
+Voi moi support pair hop le:
+
+- anchor = midpoint(t1_datetime, t2_datetime)
+- pre window = [anchor - window_before_days, anchor)
+- post window = [anchor, anchor + window_after_days]
+
+Chi giu scene trong window neu:
+
+- item_bbox hop le
+- coverage(item, AOI) >= min_aoi_coverage
+
+Sau do dedupe scene theo key:
+
+- (datetime, platform, orbit_state, relative_orbit, slice_number)
+
+Candidate hop le khi:
+
+- so scene unique pre >= min_scenes_per_window
+- so scene unique post >= min_scenes_per_window
+
+## 5.3 Ranking anchor
+
+anchor_rank_key uu tien:
+
+1. post_latest_scene_datetime moi nhat (latest input)
+2. anchor_datetime moi nhat
+3. support_t2_datetime moi nhat
+4. pre_latest_scene_datetime moi nhat
+5. support_pair_delta_seconds nho hon
+6. support_t1_id, support_t2_id de on dinh
+
+## 5.4 Auto-relax scene count
+
+choose_anchor_candidate chay required_count giam dan:
+
+- bat dau tu trainlike.min_scenes_per_window
+- neu khong co candidate va auto_relax_min_scenes = true thi giam den 1
+- neu auto_relax_min_scenes = false thi dung ngay o nguong ban dau
+
+## 6. Download, grid, composite
+
+## 6.1 Download window assets
+
+Moi scene trong pre/post window:
+
+- download theo pol VV, VH
+- subset theo AOI geometry
+- luu vao window_raw/pre hoac window_raw/post
+
+## 6.2 Build grid dich
+
+Grid tao tu AOI bbox voi target_crs, target_resolution:
+
+- left = floor(minx / xres) * xres
+- right = ceil(maxx / xres) * xres
+- bottom = floor(miny / yres) * yres
+- top = ceil(maxy / yres) * yres
+- width = round((right - left) / xres)
+- height = round((top - bottom) / yres)
+
+Transform:
+
+- Affine(xres, 0, left, 0, -yres, top)
+
+## 6.3 Composite per window
+
+Cho moi polarization (VV, VH):
+
+1. Reproject moi scene ve cung grid
+2. Stack scene
+3. composite = nanmedian(stack)
+4. Neu con NaN cuc bo: fill bang median cua phan finite (neu rong thi 0)
+5. focal median voi ban kinh:
+   radius_px = focal_median_radius_m / resolution_m
+
+Sau do ghi GeoTIFF 2-band voi descriptions:
+
+- S1_VV
+- S1_VH
+
+## 7. Inference
+
+- exact_pair: run_pair_from_single_band_files
+- stac_trainlike_composite: run_pair_from_multiband_files
 
 Output cuoi:
 
-- `output/<aoi_stem>__<anchor_id>_SR_x2.tif`
+- output/<aoi_stem>__<pair_or_anchor_id>_SR_x2.tif
 
-## 5. Config chinh
+## 8. Config chinh (theo config/pipeline_config.yaml)
 
-Config tai:
+### 8.1 workflow
 
-- [pipeline_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/pipeline_config.yaml)
+- mode: exact_pair | stac_trainlike_composite
 
-Cac section quan trong:
+### 8.2 stac
 
-### 5.1 `workflow`
+- url
+- collection
+- datetime
+- limit
 
-- `mode`: `exact_pair` hoac `stac_trainlike_composite`
+### 8.3 pairing
 
-### 5.2 `stac`
+- pols
+- orbit
+- rel_orbit
+- min_overlap (diagnostic)
+- min_aoi_coverage
+- min_delta_hours
+- max_delta_days (dung trong exact_pair)
+- same_orbit_direction
+- strict_slice (co truyen vao ham pair; hien tai find_pairs khong su dung de hard-filter)
+- auto_relax
 
-- `url`
-- `collection`
-- `datetime`
-- `limit`
+### 8.4 trainlike
 
-### 5.3 `pairing`
+- window_before_days
+- window_after_days
+- min_scenes_per_window
+- auto_relax_min_scenes
+- anchor_pick_index
+- same_orbit_direction
+- anchor_min_delta_hours
+- target_crs
+- target_resolution
+- resampling
+- focal_median_radius_m
+- window_raw_dir_name
+- composite_dir_name
 
-Dung cho hard filters va support-pair generation:
+### 8.5 compatibility
 
-- `pols`
-- `min_aoi_coverage`
-- `min_delta_hours`
-- `max_delta_days`
-- `same_orbit_direction`
+Mac dinh:
 
-### 5.4 `trainlike`
-
-- `window_before_days`
-- `window_after_days`
-- `min_scenes_per_window`
-- `auto_relax_min_scenes`
-- `anchor_pick_index`
-- `same_orbit_direction`
-- `anchor_min_delta_hours`
-- `target_crs`
-- `target_resolution`
-- `resampling`
-- `focal_median_radius_m`
-- `window_raw_dir_name`
-- `composite_dir_name`
-
-### 5.5 `compatibility`
-
-Mac dinh hien tai:
-
-```yaml
-compatibility:
-  trained_input_profile: gee_s1_db
-  current_download_profile: stac_trainlike_composite_db
-  allow_domain_mismatch: false
-```
+- trained_input_profile: gee_s1_db
+- current_download_profile: stac_trainlike_composite_db
+- allow_domain_mismatch: false
 
 Y nghia:
 
-- exact raw STAC va train-like STAC khong con bi danh dong nham la cung 1 profile
-- workflow moi duoc xem la gan hon domain model hon exact raw pair
+- exact raw STAC va train-like composite duoc xem la 2 profile khac nhau
 
-## 6. Cach chay
+## 9. CLI override trong sar_pipeline.py
 
-### 6.1 Workflow production mac dinh
+Cac tham so hay dung:
+
+- --mode
+- --datetime
+- --min-delta-hours
+- --max-delta-days
+- --min-aoi-coverage
+- --same-orbit-direction
+- --auto-relax
+- --window-before-days
+- --window-after-days
+- --min-scenes-per-window
+- --target-crs
+- --target-resolution
+- --focal-median-radius-m
+- --device
+- --output-dir
+- --cache-staging
+
+## 10. Vi du lenh chay
+
+### 10.1 Production train-like (khuyen nghi)
 
 ```bash
 python sar_pipeline.py \
@@ -239,7 +312,7 @@ python sar_pipeline.py \
   --datetime 2025-07-01/2025-09-10
 ```
 
-### 6.2 Override window
+### 10.2 Train-like voi override windows
 
 ```bash
 python sar_pipeline.py \
@@ -251,7 +324,7 @@ python sar_pipeline.py \
   --min-scenes-per-window 1
 ```
 
-### 6.3 Quay lai workflow exact pair
+### 10.3 Exact pair debug
 
 ```bash
 python sar_pipeline.py \
@@ -259,54 +332,18 @@ python sar_pipeline.py \
   --mode exact_pair
 ```
 
-## 7. Cau truc output
+## 11. Cau truc output
 
-Voi `stac_trainlike_composite`, moi run duoc luu theo dang:
+Moi run tao:
 
-- `runs/pipeline/<aoi_stem>/<run_id>/manifest.json`
-- `runs/pipeline/<aoi_stem>/<run_id>/run_summary.json`
-- `runs/pipeline/<aoi_stem>/<run_id>/run_summary.md`
-- `runs/pipeline/<aoi_stem>/<run_id>/window_raw/pre/*.tif`
-- `runs/pipeline/<aoi_stem>/<run_id>/window_raw/post/*.tif`
-- `runs/pipeline/<aoi_stem>/<run_id>/composite/s1t1_<anchor_id>.tif`
-- `runs/pipeline/<aoi_stem>/<run_id>/composite/s1t2_<anchor_id>.tif`
-- `runs/pipeline/<aoi_stem>/<run_id>/output/<aoi_stem>__<anchor_id>_SR_x2.tif`
+- runs/pipeline/<aoi_stem>/<run_id>/manifest.json
+- runs/pipeline/<aoi_stem>/<run_id>/run_summary.json
+- runs/pipeline/<aoi_stem>/<run_id>/run_summary.md
 
-## 8. Smoke test da chay
+Rieng train-like:
 
-Mình da chay end-to-end voi workflow moi.
+- runs/pipeline/<aoi_stem>/<run_id>/window_raw/pre/*.tif
+- runs/pipeline/<aoi_stem>/<run_id>/window_raw/post/*.tif
+- runs/pipeline/<aoi_stem>/<run_id>/composite/s1t1_<pair_id>.tif
+- runs/pipeline/<aoi_stem>/<run_id>/composite/s1t2_<pair_id>.tif
 
-Co the xem 1 run hien tai tai:
-
-- [run_summary.md](/mnt/data1tb/vinh/ISSM-SAR/runs/customer_jobs/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2/20260317T152309/run_summary.md)
-
-Ket qua:
-
-- query STAC thanh cong
-- chon duoc `anchor = 2025-08-04T04:58:57.472844Z`
-- download `window_raw/pre/post`
-- tao duoc 2 file composite
-- infer thanh cong
-- ghi duoc output SR hop le
-
-Luu y:
-
-- bo STAC hien tai cho AOI nay van sparse, nen smoke test chi co `pre=1`, `post=1`
-- do user da xac nhan STAC se duoc cap day du hon ve sau, workflow duoc thiet ke cho timeline phong phu hon
-
-## 9. Kien nghi hien tai
-
-Voi model hien tai, workflow nen uu tien la:
-
-1. `mode = stac_trainlike_composite`
-2. `window_before_days = 30`
-3. `window_after_days = 30`
-4. `min_scenes_per_window = 1`
-5. `target_crs = EPSG:3857`
-6. `target_resolution = 10`
-7. `focal_median_radius_m = 15`
-
-Neu can debug timeline/anchor logic:
-
-- dung `query_stac_download.py suggest-anchor`
-- xem [query_stac_download_module.md](/mnt/data1tb/vinh/ISSM-SAR/docs/query_stac_download_module.md)

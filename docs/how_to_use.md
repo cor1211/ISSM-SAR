@@ -1,399 +1,230 @@
-Cách chạy chuẩn hiện tại là dùng [sar_pipeline.py](/mnt/data1tb/vinh/ISSM-SAR/sar_pipeline.py).  
-Mode mặc định đã là `stac_trainlike_composite`, tức:
+# How To Use ISSM-SAR Pipeline (Production + Debug)
 
-- đọc `AOI geojson`
-- query timeline trên STAC
-- chọn `1 anchor` theo `latest_input_datetime` mới nhất
-- tải các scene STAC đã **cắt theo bbox chứa AOI**
-- composite local
-- infer
-- trả ra `1 GeoTIFF SR`
+## 1. Muc tieu tai lieu
 
-**1. Chuẩn bị**
-Cần:
-- env `issm`
-- STAC/S3 truy cập được
-- weights/model config đúng
-- `.env` có S3 credentials nếu hệ thống STAC asset cần auth
+Tai lieu nay huong dan cach chay he thong theo dung luong production hien tai, dong thoi mo ta ro cac mode debug va cong cu doi chieu.
 
-File config chính:
-- pipeline: [pipeline_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/pipeline_config.yaml)
-- infer: [infer_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/infer_config.yaml)
+Script chinh:
 
-Lưu ý quan trọng:
-- khi chạy `sar_pipeline.py`, `infer_config.yaml` chủ yếu dùng cho:
-  - `device`
-  - checkpoints
-  - normalization
-  - patch/batch/AMP
-- `input.input_dir` trong `infer_config.yaml` **không phải** đầu vào của pipeline này
+- sar_pipeline.py
 
-**2. Lệnh chạy production khuyến nghị**
-Ví dụ với AOI của bạn:
+Script ho tro:
+
+- query_stac_download.py
+- gee_compare_download.py
+- gee_trainlike_download.py
+
+## 2. Chon workflow nao
+
+## 2.1 Production khuyen nghi
+
+Dung:
+
+- stac_trainlike_composite
+
+Ly do:
+
+- phu hop domain input model hien tai hon exact raw pair
+- co compositing tren timeline (giam nhieu, on dinh hon)
+
+## 2.2 Khi nao dung exact_pair
+
+Dung de:
+
+- debug pair selection
+- benchmark voi luong cu
+- test nhanh khong can composite
+
+## 3. Chay nhanh production
+
+Lenh co ban:
 
 ```bash
-source /mnt/data1tb/miniconda3/etc/profile.d/conda.sh
-conda activate /mnt/data1tb/conda_envs/issm
-
 python sar_pipeline.py \
   --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --config config/pipeline_config.yaml \
+  --datetime 2025-07-01/2025-09-10
+```
+
+Giai thich:
+
+- mode duoc lay tu config (mac dinh stac_trainlike_composite)
+- datetime nen de du rong de co du support pair va scene trong windows
+
+## 4. Chay voi override tham so
+
+## 4.1 Train-like windows
+
+```bash
+python sar_pipeline.py \
+  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
+  --mode stac_trainlike_composite \
   --datetime 2025-07-01/2025-09-10 \
-  --output-dir runs/customer_jobs \
-  --cache-staging
-```
-
-Đây là lệnh nên dùng trước tiên.
-
-**3. Các tham số chính của `sar_pipeline.py`**
-CLI hiện tại ở [sar_pipeline.py](/mnt/data1tb/vinh/ISSM-SAR/sar_pipeline.py).
-
-Bắt buộc:
-- `--geojson`
-  - AOI đầu vào
-
-Rất nên truyền:
-- `--datetime`
-  - khoảng thời gian query STAC
-  - ví dụ: `2025-07-01/2025-09-10`
-  - vì pipeline đang `newest-first`, bạn nên để khoảng đủ rộng để hệ thống tự chọn mốc mới nhất tốt nhất
-
-Tùy chọn workflow:
-- `--config`
-  - file config pipeline
-- `--mode`
-  - `stac_trainlike_composite`: production khuyến nghị
-  - `exact_pair`: chỉ để debug/so sánh
-
-Tùy chọn pair/filter:
-- `--min-delta-hours`
-  - delta tối thiểu giữa support pair
-  - mặc định: `24`
-- `--max-delta-days`
-  - delta tối đa giữa support pair
-  - mặc định: `10`
-- `--min-aoi-coverage`
-  - coverage tối thiểu của `AOI bbox` trên mỗi item
-  - mặc định: `1.0`
-- `--same-orbit-direction`
-  - nếu bật, support pair/anchor chỉ dùng các item cùng `ascending/descending`
-- `--auto-relax`
-  - chỉ hữu ích hơn trong mode `exact_pair`; với production train-like thường không cần bật
-
-Tùy chọn train-like composite:
-- `--window-before-days`
-  - độ dài window trước anchor
-  - mặc định: `30`
-- `--window-after-days`
-  - độ dài window sau anchor
-  - mặc định: `30`
-- `--min-scenes-per-window`
-  - số scene unique tối thiểu mỗi window
-  - mặc định hiện tại: `1`
-- `--target-crs`
-  - CRS chuẩn để align/composite
-  - mặc định: `EPSG:3857`
-- `--target-resolution`
-  - pixel size target
-  - mặc định: `10`
-- `--focal-median-radius-m`
-  - radius của bước làm mượt sau composite
-  - mặc định: `15`
-
-Tùy chọn chạy/infer:
-- `--device`
-  - `cuda`, `cuda:0`, `cpu`
-- `--output-dir`
-  - thư mục root của run
-- `--cache-staging`
-  - lưu thêm input aligned/composite để kiểm tra
-
-**4. Giá trị mặc định hiện tại**
-Trong [pipeline_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/pipeline_config.yaml):
-
-- `workflow.mode = stac_trainlike_composite`
-- `pairing.pols = VV,VH`
-- `pairing.min_aoi_coverage = 1.0`
-- `pairing.min_delta_hours = 24`
-- `pairing.max_delta_days = 10`
-- `pairing.same_orbit_direction = false`
-- `trainlike.window_before_days = 30`
-- `trainlike.window_after_days = 30`
-- `trainlike.min_scenes_per_window = 1`
-- `trainlike.target_crs = EPSG:3857`
-- `trainlike.target_resolution = 10`
-- `trainlike.focal_median_radius_m = 15`
-
-**5. Lệnh production nên dùng theo từng tình huống**
-
-Chạy mặc định:
-```bash
-python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
-  --datetime 2025-01-01/2025-12-31
-```
-
-Chạy production, ép cùng hướng orbit:
-```bash
-python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
-  --datetime 2025-01-01/2025-12-31 \
-  --same-orbit-direction
-```
-
-Chạy production với window khác:
-```bash
-python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
-  --datetime 2025-01-01/2025-12-31 \
   --window-before-days 30 \
   --window-after-days 30 \
   --min-scenes-per-window 1
 ```
 
-Chạy debug bằng exact pair:
+## 4.2 Pair constraints (chu yeu cho exact_pair)
+
 ```bash
 python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
+  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
   --mode exact_pair \
-  --datetime 2025-01-01/2025-12-31
+  --min-delta-hours 24 \
+  --max-delta-days 10 \
+  --min-aoi-coverage 1.0 \
+  --same-orbit-direction
 ```
 
-**6. Cách pipeline hiện chọn dữ liệu**
-Cho production `stac_trainlike_composite`:
+## 5. Cong thuc va dieu kien can nho
 
-1. query STAC theo AOI + `datetime`
-2. hard filter theo `VV,VH`, `IW`, `GRD`, `AOI bbox coverage`
-3. sinh support pair
-4. từ mỗi support pair suy ra `anchor = midpoint`
-5. xếp hạng anchor theo:
-   - `latest_input_datetime` mới nhất
-   - rồi mới đến các tie-break khác
-6. chọn đúng `1 anchor`
-7. lấy:
-   - `pre window = [anchor - before_days, anchor]`
-   - `post window = [anchor, anchor + after_days]`
-8. tải các scene STAC trong 2 window dưới dạng **subset bbox chứa AOI**
-9. composite + focal median
-10. infer
+## 5.1 AOI coverage
 
-**7. Dữ liệu tải về có phải full item không?**
-Không.  
-Pipeline hiện tại tải **subset bbox AOI**, không tải full scene.
+coverage = area(intersection(AOI_bbox, item_bbox)) / area(AOI_bbox)
 
-Logic này ở [query_stac_download.py:699](/mnt/data1tb/vinh/ISSM-SAR/query_stac_download.py:699).
+Mac dinh:
 
-**8. Output nằm ở đâu**
-Sau mỗi run, thư mục có dạng:
+- min_aoi_coverage = 1.0
 
-- `runs/.../<aoi_stem>/<run_id>/manifest.json`
-- `runs/.../<aoi_stem>/<run_id>/run_summary.json`
-- `runs/.../<aoi_stem>/<run_id>/run_summary.md`
-- `runs/.../<aoi_stem>/<run_id>/window_raw/pre/*.tif`
-- `runs/.../<aoi_stem>/<run_id>/window_raw/post/*.tif`
-- `runs/.../<aoi_stem>/<run_id>/composite/s1t1_*.tif`
-- `runs/.../<aoi_stem>/<run_id>/composite/s1t2_*.tif`
-- `runs/.../<aoi_stem>/<run_id>/output/*_SR_x2.tif`
+## 5.2 Exact pair time gate
 
-Ví dụ run hiện tại:
-- [run_summary.md](/mnt/data1tb/vinh/ISSM-SAR/runs/customer_jobs/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2/20260317T152309/run_summary.md)
+Dieu kien:
 
-**9. Lệnh debug rất hữu ích trước khi chạy full pipeline**
+- min_delta_hours <= delta <= max_delta_days
 
-Xem support pairs:
-```bash
-python query_stac_download.py pair \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --datetime 2025-07-01/2025-09-10 \
-  --top-k 10
-```
+Trong code:
 
-Xem anchor candidates:
-```bash
-python query_stac_download.py suggest-anchor \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --datetime 2025-07-01/2025-09-10 \
-  --window-before-days 30 \
-  --window-after-days 30 \
-  --min-scenes-per-window 1 \
-  --top-k 10
-```
+- delta tinh theo giay
+- min_delta_hours * 3600
+- max_delta_days * 86400
 
-**10. Khuyến nghị thực tế**
-Nếu mục tiêu là “AOI khách hàng vào, trả SR từ dữ liệu mới nhất có thể”, mình khuyên dùng mặc định này:
+## 5.3 Train-like support pair time gate
 
-```bash
-python sar_pipeline.py \
-  --geojson geojson/<customer_aoi>.geojson \
-  --config config/pipeline_config.yaml \
-  --datetime 2025-01-01/2025-12-31 \
-  --output-dir runs/customer_jobs \
-  --cache-staging
-```
+Trong suggest_trainlike_anchors:
 
-với:
-- `mode = stac_trainlike_composite`
-- `window_before_days = 30`
-- `window_after_days = 30`
-- `min_scenes_per_window = 1`
-- `same_orbit_direction = false`
+- delta >= anchor_min_delta_hours (hoac pairing.min_delta_hours)
+- delta <= window_before_days + window_after_days
 
-**11. Khi nào nên đổi tham số**
-- Muốn dữ liệu “mới nhất tuyệt đối”: giữ `same_orbit_direction = false`
-- Muốn đồng nhất hình học hơn: bật `--same-orbit-direction`
-- STAC rất dày và bạn muốn tránh window quá nghèo: tăng `--min-scenes-per-window`
-- Muốn support pair không quá xa nhau: giảm `--max-delta-days`
-- Muốn broaden candidate mới nhất: tăng rộng `--datetime`
+Y nghia:
 
-Nếu bạn muốn, mình có thể làm tiếp một phần rất hữu ích:
-1. viết sẵn 3 command template cho `production`, `strict newest`, và `same-orbit`
-2. hoặc thêm một `docs/how_to_run_pipeline.md` riêng, gọn kiểu runbook để bạn dùng trực tiếp cho vận hành.
+- support pair duoc rang buoc boi do rong timeline ma windows can cover
 
-**12. Chạy bằng Docker (đã build image `issm-sar-pipeline:latest`)**
+## 5.4 Window convention
 
-Image hiện có:
-- `ENTRYPOINT ["python", "sar_pipeline.py"]`
-- `WORKDIR /app`
+Voi anchor A:
 
-Vì vậy khi chạy `docker run`, bạn chỉ cần truyền các args của `sar_pipeline.py`.
+- pre (S1T2): [A - before, A)
+- post (S1T1): [A, A + after]
 
-Mount khuyến nghị:
-- `geojson` (read-only)
-- `config` (read-only)
-- `weights` (read-only)
-- `runs/customer_jobs` (read-write)
-- `.env` (read-only) nếu cần S3/STAC auth
+## 5.5 Composite
 
-Lệnh production khuyến nghị (GPU):
+Moi polarization:
 
-```bash
-docker run --rm -it --gpus all \
-  --env-file .env \
-  -v "$(pwd)/geojson:/app/geojson:ro" \
-  -v "$(pwd)/config:/app/config:ro" \
-  -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/runs/customer_jobs:/app/runs/customer_jobs" \
-  issm-sar-pipeline:latest \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --config config/pipeline_config.yaml \
-  --datetime 2025-07-01/2025-09-10 \
-  --output-dir runs/customer_jobs \
-  --cache-staging \
-  --device cuda
-```
+- warp scene ve 1 grid chung
+- nanmedian(scene stack)
+- focal_median(radius_m)
 
-Lệnh production khuyến nghị (CPU):
+## 6. Cac file output
 
-```bash
-docker run --rm -it \
-  --env-file .env \
-  -v "$(pwd)/geojson:/app/geojson:ro" \
-  -v "$(pwd)/config:/app/config:ro" \
-  -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/runs/customer_jobs:/app/runs/customer_jobs" \
-  issm-sar-pipeline:latest \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --config config/pipeline_config.yaml \
-  --datetime 2025-07-01/2025-09-10 \
-  --output-dir runs/customer_jobs \
-  --cache-staging \
-  --device cpu
-```
+Moi run tao:
 
-Template tham số theo tình huống (giữ nguyên lệnh Docker, chỉ đổi phần args cuối):
+- runs/pipeline/<aoi_stem>/<run_id>/manifest.json
+- runs/pipeline/<aoi_stem>/<run_id>/run_summary.json
+- runs/pipeline/<aoi_stem>/<run_id>/run_summary.md
+- runs/pipeline/<aoi_stem>/<run_id>/output/*.tif
 
-`strict newest` (ưu tiên mới nhất tuyệt đối):
+Rieng train-like:
+
+- window_raw/pre/*.tif
+- window_raw/post/*.tif
+- composite/s1t1_*.tif
+- composite/s1t2_*.tif
+
+## 7. Cach doc run_summary
+
+## 7.1 Neu mode exact_pair
+
+Kiem tra:
+
+- selected_pair.latest_input_datetime
+- selected_pair.delta_days
+- selected_pair.aoi_bbox_coverage_t1/t2
+- selection_profile (strict/balanced/loose)
+
+## 7.2 Neu mode stac_trainlike_composite
+
+Kiem tra:
+
+- anchor.anchor_datetime
+- anchor.latest_input_datetime
+- anchor.pre_scene_count / post_scene_count
+- composite.pre/post.scene_counts
+- run_config.window_before_days / window_after_days
+
+## 8. Troubleshooting nhanh
+
+## 8.1 Loi no valid pair found
+
+Huong xu ly:
+
+1. Mo rong --datetime
+2. Giam --min-aoi-coverage neu AOI kho
+3. Giam --min-delta-hours
+4. Bat --auto-relax (exact_pair)
+5. Neu train-like: giam --min-scenes-per-window
+
+## 8.2 Loi no valid STAC anchor candidate
+
+Thu:
+
+1. Mo rong datetime range
+2. Giam min-scenes-per-window
+3. Tat same orbit neu dang bat
+4. Kiem tra STAC source co du VV/VH khong
+
+## 8.3 Output chat luong kem
+
+Can xem:
+
+- compatibility profile co mismatch khong
+- so scene pre/post qua it
+- windows qua hep
+- STAC timeline qua sparse
+
+## 9. Kiem tra pair/anchor doc lap
+
+Dung query_stac_download.py de debug truoc khi chay infer:
+
+- inspect items
+- suggest anchors
+- xem diagnostics no_pair
+
+Vi du:
 
 ```bash
---geojson geojson/<customer_aoi>.geojson \
---config config/pipeline_config.yaml \
---datetime 2025-01-01/2025-12-31 \
---output-dir runs/customer_jobs \
---cache-staging \
---device cuda
+python query_stac_download.py --help
 ```
 
-`same-orbit` (đồng nhất quỹ đạo hơn):
+## 10. Cong cu doi chieu voi GEE
 
-```bash
---geojson geojson/<customer_aoi>.geojson \
---config config/pipeline_config.yaml \
---datetime 2025-01-01/2025-12-31 \
---same-orbit-direction \
---output-dir runs/customer_jobs \
---cache-staging \
---device cuda
-```
+## 10.1 gee_compare_download.py
 
-`window chặt hơn` (muốn window có nhiều scene hơn):
+Dung de tim cap GEE gan voi system pair STAC.
 
-```bash
---geojson geojson/<customer_aoi>.geojson \
---config config/pipeline_config.yaml \
---datetime 2025-01-01/2025-12-31 \
---min-scenes-per-window 2 \
---output-dir runs/customer_jobs \
---cache-staging \
---device cuda
-```
+## 10.2 gee_trainlike_download.py
 
-Nếu hệ STAC/S3 dùng AWS profile thay vì `.env`, mount thêm:
+Dung de tao train-like pair tren GEE windows roi so sanh voi STAC train-like.
 
-```bash
--v "$HOME/.aws:/root/.aws:ro"
-```
+Luu y:
 
-Lưu ý khi chạy Docker:
-- Không cần `conda activate`.
-- Đường dẫn trong args nên là path trong container (`/app/...`), ví dụ dùng `geojson/...`, `config/...`, `runs/...` như các lệnh ở trên.
-- Nếu máy không có GPU runtime của Docker/NVIDIA, bỏ `--gpus all` và đặt `--device cpu`.
+- 2 script nay la diagnostic/benchmark, khong phai luong production chinh.
 
-**13. Ghi chú nhanh: tham số bắt buộc vs mặc định**
+## 11. Checklist truoc khi chay production
 
-Nhóm **nhất định phải truyền** khi chạy (`python sar_pipeline.py` hoặc `docker run ...`):
-- `--geojson`
-  - Không có default ở CLI.
-  - Nếu thiếu sẽ lỗi ngay vì parser đang `required=True`.
+1. config/pipeline_config.yaml da dat mode dung
+2. STAC url va collection dung
+3. datetime du rong
+4. AOI geojson hop le
+5. target_crs va target_resolution dung nhu mong muon
+6. du quyen ghi vao output dir
 
-Nhóm **đã set mặc định ngay ở CLI**:
-- `--config`
-  - default: `config/pipeline_config.yaml`
-- `--same-orbit-direction`
-  - default: `false` (chỉ bật khi bạn truyền flag)
-- `--auto-relax`
-  - default: `false` (chỉ bật khi bạn truyền flag)
-- `--cache-staging`
-  - default: `false` ở CLI (nhưng xem thêm mục dưới vì config có thể bật cache)
-
-Nhóm **không có default ở CLI (`default=None`), nên sẽ lấy từ config**:
-- `--mode`
-  - mặc định từ config: `workflow.mode = stac_trainlike_composite`
-- `--datetime`
-  - mặc định từ config: `stac.datetime = null`
-  - nghĩa là thực tế bạn **nên truyền** để tránh query quá rộng/khó kiểm soát
-- `--min-delta-hours`
-  - mặc định từ config: `pairing.min_delta_hours = 24.0`
-- `--max-delta-days`
-  - mặc định từ config: `pairing.max_delta_days = 10`
-- `--min-aoi-coverage`
-  - mặc định từ config: `pairing.min_aoi_coverage = 1.0`
-- `--window-before-days`
-  - mặc định từ config: `trainlike.window_before_days = 30`
-- `--window-after-days`
-  - mặc định từ config: `trainlike.window_after_days = 30`
-- `--min-scenes-per-window`
-  - mặc định từ config: `trainlike.min_scenes_per_window = 1`
-- `--target-crs`
-  - mặc định từ config: `trainlike.target_crs = EPSG:3857`
-- `--target-resolution`
-  - mặc định từ config: `trainlike.target_resolution = 10.0`
-- `--focal-median-radius-m`
-  - mặc định từ config: `trainlike.focal_median_radius_m = 15.0`
-- `--device`
-  - mặc định từ infer config: `config/infer_config.yaml -> device = cuda`
-- `--output-dir`
-  - mặc định từ config: `output.root_dir = runs/pipeline`
-
-Ghi chú quan trọng:
-- `--cache-staging` là flag CLI (mặc định `false`), nhưng nếu `staging.cache_aligned_inputs = true` trong config thì pipeline vẫn cache.
-- Vì `stac.datetime` trong config đang `null`, để chạy production ổn định bạn nên luôn truyền `--datetime`.
