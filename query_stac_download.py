@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import re
@@ -30,10 +31,16 @@ from urllib.parse import urlparse
 import rasterio
 import requests
 from dotenv import load_dotenv
+from pyproj import Geod
 from rasterio.features import bounds as geometry_bounds
 from rasterio.session import AWSSession
 from rasterio.warp import transform_geom
 from rasterio.windows import Window, from_bounds
+from shapely.geometry import GeometryCollection, box as shapely_box, mapping, shape
+from shapely.ops import unary_union
+from shapely.validation import make_valid
+
+from runtime_logging import detect_s3_credential_source, emit_runtime_log, safe_text_snippet
 
 try:
     import boto3
@@ -45,6 +52,10 @@ load_dotenv()
 
 DEFAULT_STAC_API = os.getenv("STAC_API_URL", "http://localhost:8080")
 DEFAULT_COLLECTION = "sentinel-1-grd"
+WGS84_GEOD = Geod(ellps="WGS84")
+_BBOX_WARN_TOL = 1e-7
+_ALLOWED_REPRESENTATIVE_POOL_MODES = {"auto", "orbit_only", "mixed"}
+logger = logging.getLogger("query_stac_download")
 
 
 def parse_datetime_utc(value: str) -> datetime:
@@ -74,6 +85,15 @@ def normalize_datetime_range(datetime_range: Optional[str]) -> Optional[str]:
     return "/".join(formatted_parts)
 
 
+def normalize_representative_pool_mode(value: Optional[str]) -> str:
+    """Normalize representative monthly pool-selection mode."""
+    mode = str(value or "auto").strip().lower()
+    if mode not in _ALLOWED_REPRESENTATIVE_POOL_MODES:
+        allowed = ", ".join(sorted(_ALLOWED_REPRESENTATIVE_POOL_MODES))
+        raise ValueError(f"Unsupported representative_pool_mode: {value!r}. Expected one of: {allowed}.")
+    return mode
+
+
 def _iter_coords(node: Any) -> Iterable[Tuple[float, float]]:
     """Duyet de quy cac toa do [lon, lat] trong GeoJSON geometry."""
     if isinstance(node, (list, tuple)):
@@ -82,6 +102,69 @@ def _iter_coords(node: Any) -> Iterable[Tuple[float, float]]:
             return
         for child in node:
             yield from _iter_coords(child)
+
+
+def _repair_shapely_geometry(geom):
+    if geom is None or geom.is_empty:
+        return GeometryCollection()
+    try:
+        if geom.is_valid:
+            return geom
+    except Exception:
+        pass
+    try:
+        repaired = make_valid(geom)
+        if repaired is not None and not repaired.is_empty:
+            geom = repaired
+    except Exception:
+        pass
+    try:
+        if geom.is_valid:
+            return geom
+    except Exception:
+        pass
+    try:
+        repaired = geom.buffer(0)
+        if repaired is not None and not repaired.is_empty:
+            geom = repaired
+    except Exception:
+        pass
+    if geom is None or geom.is_empty:
+        return GeometryCollection()
+    return geom
+
+
+def _shape_from_geojson(geometry: Optional[Dict[str, Any]]):
+    if not geometry:
+        return GeometryCollection()
+    try:
+        return _repair_shapely_geometry(shape(geometry))
+    except Exception:
+        return GeometryCollection()
+
+
+def geodesic_area_wgs84(geom) -> float:
+    if geom is None or geom.is_empty:
+        return 0.0
+    try:
+        area, _ = WGS84_GEOD.geometry_area_perimeter(geom)
+        return abs(float(area))
+    except Exception:
+        if getattr(geom, "geom_type", None) == "GeometryCollection":
+            return sum(geodesic_area_wgs84(part) for part in geom.geoms)
+        raise
+
+
+def canonical_bbox_from_geometry(geometry: Dict[str, Any]) -> List[float]:
+    geom = _shape_from_geojson(geometry)
+    if geom.is_empty:
+        raise ValueError("Khong the tinh bbox tu geometry rong/khong hop le.")
+    minx, miny, maxx, maxy = geom.bounds
+    return [float(minx), float(miny), float(maxx), float(maxy)]
+
+
+def _bbox_is_meaningfully_different(left: List[float], right: List[float], tol: float = _BBOX_WARN_TOL) -> bool:
+    return any(abs(float(a) - float(b)) > tol for a, b in zip(left, right))
 
 
 def load_geojson_aoi(geojson_path: str | Path) -> Tuple[List[float], Dict[str, Any]]:
@@ -109,23 +192,22 @@ def load_geojson_aoi(geojson_path: str | Path) -> Tuple[List[float], Dict[str, A
     if not geoms:
         raise ValueError(f"Khong tim thay geometry hop le trong {path}")
 
-    if len(geoms) == 1:
-        aoi_geometry = geoms[0]
-    else:
-        aoi_geometry = {"type": "GeometryCollection", "geometries": geoms}
+    raw_geometry = geoms[0] if len(geoms) == 1 else {"type": "GeometryCollection", "geometries": geoms}
+    aoi_geom = _shape_from_geojson(raw_geometry)
+    if aoi_geom.is_empty:
+        raise ValueError(f"Khong chuyen duoc AOI geometry thanh hinh hop le trong {path}")
 
-    if isinstance(data.get("bbox"), list) and len(data["bbox"]) == 4:
-        bbox = [float(v) for v in data["bbox"]]
-    else:
-        xs: List[float] = []
-        ys: List[float] = []
-        for geom in geoms:
-            for x, y in _iter_coords(geom.get("coordinates", [])):
-                xs.append(x)
-                ys.append(y)
-        if not xs or not ys:
-            raise ValueError(f"Khong trich xuat duoc bbox tu geometry trong {path}")
-        bbox = [min(xs), min(ys), max(xs), max(ys)]
+    aoi_geometry = mapping(aoi_geom)
+    bbox = canonical_bbox_from_geometry(aoi_geometry)
+
+    provided_bbox = data.get("bbox")
+    if isinstance(provided_bbox, list) and len(provided_bbox) == 4:
+        provided = [float(v) for v in provided_bbox]
+        if _bbox_is_meaningfully_different(provided, bbox):
+            print(
+                f"[AOI] Warning: top-level bbox in {path} differs from geometry bounds and will be ignored. "
+                f"provided={provided} geometry_bbox={bbox}"
+            )
 
     return bbox, aoi_geometry
 
@@ -190,6 +272,304 @@ def bbox_to_geometry(bbox: List[float]) -> Dict[str, Any]:
             ]
         ],
     }
+
+
+def _resolve_item_geometry(item: Dict[str, Any]):
+    item_geometry = item.get("geometry")
+    geom = _shape_from_geojson(item_geometry)
+    if not geom.is_empty:
+        return geom, "geometry", mapping(geom)
+
+    info = extract_item_info(item)
+    bbox = info.get("bbox", [])
+    if len(bbox) == 4:
+        bbox_geom = bbox_to_geometry(bbox)
+        geom = _shape_from_geojson(bbox_geom)
+        if not geom.is_empty:
+            return geom, "bbox_fallback", mapping(geom)
+
+    return GeometryCollection(), "none", None
+
+
+def _compute_item_aoi_geometry_metrics_prepared(
+    item: Dict[str, Any],
+    aoi_geom,
+    aoi_area: float,
+    aoi_bbox: Optional[List[float]] = None,
+) -> Dict[str, Any]:
+    item_geom, coverage_source, resolved_geojson = _resolve_item_geometry(item)
+    coverage = 0.0
+    if aoi_area > 0 and not aoi_geom.is_empty and not item_geom.is_empty:
+        coverage = geodesic_area_wgs84(aoi_geom.intersection(item_geom)) / aoi_area
+
+    bbox = extract_item_info(item).get("bbox", [])
+    bbox_coverage = coverage_ratio(aoi_bbox, bbox) if aoi_bbox is not None and len(bbox) == 4 else 0.0
+    resolved_bbox: Optional[List[float]] = None
+    if not item_geom.is_empty:
+        minx, miny, maxx, maxy = item_geom.bounds
+        resolved_bbox = [float(minx), float(miny), float(maxx), float(maxy)]
+
+    return {
+        "aoi_coverage": float(coverage),
+        "aoi_bbox_coverage": float(bbox_coverage),
+        "coverage_source": coverage_source,
+        "resolved_geometry_geojson": resolved_geojson,
+        "resolved_shapely_geometry": item_geom,
+        "resolved_bbox": resolved_bbox,
+    }
+
+
+def compute_item_aoi_geometry_metrics(
+    item: Dict[str, Any],
+    aoi_geometry: Dict[str, Any],
+    aoi_bbox: Optional[List[float]] = None,
+) -> Dict[str, Any]:
+    aoi_geom = _shape_from_geojson(aoi_geometry)
+    aoi_area = geodesic_area_wgs84(aoi_geom)
+    return _compute_item_aoi_geometry_metrics_prepared(item, aoi_geom, aoi_area, aoi_bbox=aoi_bbox)
+
+
+def annotate_items_for_aoi(
+    items: List[Dict[str, Any]],
+    aoi_geometry: Dict[str, Any],
+    aoi_bbox: Optional[List[float]] = None,
+) -> None:
+    aoi_geom = _shape_from_geojson(aoi_geometry)
+    aoi_area = geodesic_area_wgs84(aoi_geom)
+    for item in items:
+        metrics = _compute_item_aoi_geometry_metrics_prepared(item, aoi_geom, aoi_area, aoi_bbox=aoi_bbox)
+        item["_aoi_coverage"] = metrics["aoi_coverage"]
+        item["_aoi_bbox_coverage"] = metrics["aoi_bbox_coverage"]
+        item["_coverage_source"] = metrics["coverage_source"]
+        item["_resolved_geometry_geojson"] = metrics["resolved_geometry_geojson"]
+        item["_resolved_shapely_geometry"] = metrics["resolved_shapely_geometry"]
+        item["_resolved_bbox"] = metrics["resolved_bbox"]
+
+
+def item_aoi_coverage_value(item: Dict[str, Any]) -> float:
+    return float(item.get("_aoi_coverage", 0.0))
+
+
+def item_aoi_bbox_coverage_value(item: Dict[str, Any]) -> float:
+    return float(item.get("_aoi_bbox_coverage", 0.0))
+
+
+def item_coverage_source(item: Dict[str, Any]) -> str:
+    return str(item.get("_coverage_source", "none"))
+
+
+def items_union_coverage(items: List[Dict[str, Any]], aoi_geometry: Dict[str, Any]) -> float:
+    if not items:
+        return 0.0
+    aoi_geom = _shape_from_geojson(aoi_geometry)
+    aoi_area = geodesic_area_wgs84(aoi_geom)
+    if aoi_geom.is_empty or aoi_area <= 0:
+        return 0.0
+    geoms = []
+    for item in items:
+        geom = item.get("_resolved_shapely_geometry")
+        if geom is not None and not getattr(geom, "is_empty", True):
+            geoms.append(geom)
+    if not geoms:
+        return 0.0
+    union_geom = unary_union(geoms)
+    return geodesic_area_wgs84(aoi_geom.intersection(union_geom)) / aoi_area
+
+
+def compute_item_region_coverage_metrics(
+    item: Dict[str, Any],
+    region_geometry: Dict[str, Any],
+    region_bbox: Optional[List[float]] = None,
+) -> Dict[str, Any]:
+    """Compute how much of a child region is covered by one item geometry."""
+    return compute_item_aoi_geometry_metrics(item, region_geometry, aoi_bbox=region_bbox)
+
+
+def _coverage_stats_from_records(records: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Summarize coverage ratios recorded for one candidate region."""
+    coverages = [float(rec.get("coverage", 0.0)) for rec in records]
+    if not coverages:
+        return {
+            "count": 0,
+            "min": 0.0,
+            "max": 0.0,
+            "avg": 0.0,
+        }
+    return {
+        "count": len(coverages),
+        "min": float(min(coverages)),
+        "max": float(max(coverages)),
+        "avg": float(sum(coverages) / len(coverages)),
+    }
+
+
+def collect_items_covering_region(
+    items: List[Dict[str, Any]],
+    region_geometry: Dict[str, Any],
+    region_bbox: Optional[List[float]] = None,
+    min_region_coverage: float = 0.0,
+) -> Dict[str, Any]:
+    """Split items into considered vs accepted membership for one child region."""
+    threshold = float(min_region_coverage)
+    considered_items: List[Dict[str, Any]] = []
+    accepted_items: List[Dict[str, Any]] = []
+    considered_records: List[Dict[str, Any]] = []
+    accepted_records: List[Dict[str, Any]] = []
+    for item in items:
+        metrics = compute_item_region_coverage_metrics(item, region_geometry, region_bbox=region_bbox)
+        coverage = float(metrics["aoi_coverage"])
+        info = extract_item_info(item)
+        record = {
+            "id": info.get("id"),
+            "datetime": info.get("datetime"),
+            "coverage": coverage,
+            "aoi_bbox_coverage": float(metrics.get("aoi_bbox_coverage", 0.0)),
+            "coverage_source": metrics.get("coverage_source"),
+        }
+        if coverage > 0.0:
+            considered_items.append(item)
+            considered_records.append(record)
+        if coverage >= threshold and coverage > 0.0:
+            accepted_items.append(item)
+            accepted_records.append(record)
+    return {
+        "coverage_threshold": threshold,
+        "considered_items": considered_items,
+        "accepted_items": accepted_items,
+        "considered_records": considered_records,
+        "accepted_records": accepted_records,
+        "considered_item_ids": [str(rec["id"]) for rec in considered_records],
+        "accepted_item_ids": [str(rec["id"]) for rec in accepted_records],
+        "considered_item_count": len(considered_records),
+        "accepted_item_count": len(accepted_records),
+        "considered_scene_count": len(summarize_unique_scenes(considered_items)),
+        "accepted_scene_count": len(summarize_unique_scenes(accepted_items)),
+        "considered_coverage_stats": _coverage_stats_from_records(considered_records),
+        "accepted_coverage_stats": _coverage_stats_from_records(accepted_records),
+    }
+
+
+def build_seed_intersection_region_candidates(
+    *,
+    pre_items: List[Dict[str, Any]],
+    post_items: List[Dict[str, Any]],
+    parent_aoi_geometry: Dict[str, Any],
+    parent_aoi_bbox: Optional[List[float]],
+    min_region_coverage: float = 0.0,
+    min_region_area_ratio: float = 0.0,
+    min_region_area_m2: float = 0.0,
+) -> List[Dict[str, Any]]:
+    """Build child-region candidates R_X = AOI ∩ footprint(X) for one period.
+
+    Candidate generation stays intentionally simple:
+      - each period item can seed one child region
+      - all items that cover that region above `min_region_coverage` join the region
+      - exact-equal regions are merged by geometry key while preserving all seed ids
+    """
+    parent_geom = _shape_from_geojson(parent_aoi_geometry)
+    parent_area = geodesic_area_wgs84(parent_geom)
+    if parent_geom.is_empty or parent_area <= 0:
+        return []
+
+    seed_items = sorted(
+        pre_items + post_items,
+        key=lambda item: (extract_item_info(item).get("datetime") or "", extract_item_info(item).get("id") or ""),
+    )
+    by_geometry_key: Dict[str, Dict[str, Any]] = {}
+
+    for seed_item in seed_items:
+        seed_info = extract_item_info(seed_item)
+        seed_geom = seed_item.get("_resolved_shapely_geometry")
+        if seed_geom is None or getattr(seed_geom, "is_empty", True):
+            seed_geom, _, _ = _resolve_item_geometry(seed_item)
+        if seed_geom is None or getattr(seed_geom, "is_empty", True):
+            continue
+
+        region_geom = _repair_shapely_geometry(parent_geom.intersection(seed_geom))
+        if region_geom.is_empty:
+            continue
+
+        region_geojson = mapping(region_geom)
+        region_bbox = canonical_bbox_from_geometry(region_geojson)
+        region_area = geodesic_area_wgs84(region_geom)
+        area_ratio = (region_area / parent_area) if parent_area > 0 else 0.0
+        geometry_key = region_geom.wkb_hex
+
+        candidate = by_geometry_key.get(geometry_key)
+        if candidate is None:
+            pre_region_membership = collect_items_covering_region(
+                pre_items,
+                region_geojson,
+                region_bbox=region_bbox,
+                min_region_coverage=min_region_coverage,
+            )
+            post_region_membership = collect_items_covering_region(
+                post_items,
+                region_geojson,
+                region_bbox=region_bbox,
+                min_region_coverage=min_region_coverage,
+            )
+            pre_covering_items = pre_region_membership["accepted_items"]
+            post_covering_items = post_region_membership["accepted_items"]
+            reject_reasons: List[str] = []
+            if region_area <= 0:
+                reject_reasons.append("EMPTY_REGION")
+            if float(min_region_area_m2) > 0 and region_area < float(min_region_area_m2):
+                reject_reasons.append("REGION_AREA_BELOW_MIN_M2")
+            if float(min_region_area_ratio) > 0 and area_ratio < float(min_region_area_ratio):
+                reject_reasons.append("REGION_AREA_RATIO_BELOW_MIN")
+            candidate = {
+                "candidate_region_key": geometry_key,
+                "geometry": region_geojson,
+                "bbox": region_bbox,
+                "area_m2": region_area,
+                "area_ratio_vs_parent": area_ratio,
+                "seed_item_ids": [],
+                "seed_item_datetimes": [],
+                "membership_coverage_threshold": float(min_region_coverage),
+                "pre_considered_items": pre_region_membership["considered_records"],
+                "post_considered_items": post_region_membership["considered_records"],
+                "pre_accepted_items": pre_region_membership["accepted_records"],
+                "post_accepted_items": post_region_membership["accepted_records"],
+                "pre_considered_item_ids": pre_region_membership["considered_item_ids"],
+                "post_considered_item_ids": post_region_membership["considered_item_ids"],
+                "pre_considered_item_count": pre_region_membership["considered_item_count"],
+                "post_considered_item_count": post_region_membership["considered_item_count"],
+                "pre_considered_scene_count": pre_region_membership["considered_scene_count"],
+                "post_considered_scene_count": post_region_membership["considered_scene_count"],
+                "pre_considered_coverage_stats": pre_region_membership["considered_coverage_stats"],
+                "post_considered_coverage_stats": post_region_membership["considered_coverage_stats"],
+                "pre_covering_items": pre_covering_items,
+                "post_covering_items": post_covering_items,
+                "pre_covering_item_ids": pre_region_membership["accepted_item_ids"],
+                "post_covering_item_ids": post_region_membership["accepted_item_ids"],
+                "pre_covering_item_count": pre_region_membership["accepted_item_count"],
+                "post_covering_item_count": post_region_membership["accepted_item_count"],
+                "pre_covering_scene_count": pre_region_membership["accepted_scene_count"],
+                "post_covering_scene_count": post_region_membership["accepted_scene_count"],
+                "pre_covering_coverage_stats": pre_region_membership["accepted_coverage_stats"],
+                "post_covering_coverage_stats": post_region_membership["accepted_coverage_stats"],
+                "parent_aoi_bbox": parent_aoi_bbox,
+                "parent_aoi_area_m2": parent_area,
+                "region_item_min_coverage": float(min_region_coverage),
+                "reject_reasons": reject_reasons,
+                "_region_shapely_geometry": region_geom,
+            }
+            by_geometry_key[geometry_key] = candidate
+
+        candidate["seed_item_ids"].append(seed_info["id"])
+        candidate["seed_item_datetimes"].append(seed_info["datetime"])
+
+    candidates = list(by_geometry_key.values())
+    candidates.sort(
+        key=lambda cand: (
+            -float(cand["area_m2"]),
+            cand["bbox"][0],
+            cand["bbox"][1],
+            ",".join(sorted(cand["seed_item_ids"])),
+        )
+    )
+    return candidates
 
 
 def parse_required_pols(raw: Optional[str]) -> List[str]:
@@ -295,7 +675,7 @@ class STACClient:
     def __init__(self, api_url: str):
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
-        print(f"[STAC] API URL: {self.api_url}")
+        emit_runtime_log("query_stac_download", logging.INFO, "Initialized STAC client", stac_url=self.api_url)
 
     def search_items(
         self,
@@ -318,25 +698,54 @@ class STACClient:
         if query:
             base_payload["query"] = query
 
+        emit_runtime_log(
+            "query_stac_download",
+            logging.INFO,
+            "Starting STAC search",
+            collection=collection,
+            datetime=datetime_range,
+            limit=max(1, int(limit)),
+            has_bbox=bool(bbox),
+            has_intersects=bool(intersects),
+            has_query=bool(query),
+        )
+
         def _try_post(payload: Dict[str, Any], tag: str) -> Optional[List[Dict[str, Any]]]:
+            request_started = datetime.now()
             try:
                 resp = self.session.post(search_url, json=payload, timeout=60)
                 resp.raise_for_status()
                 data = resp.json()
                 features = data.get("features", [])
-                print(f"[STAC] POST /search ({tag}) -> {len(features)} items")
+                duration_ms = int((datetime.now() - request_started).total_seconds() * 1000)
+                emit_runtime_log(
+                    "query_stac_download",
+                    logging.INFO,
+                    "STAC POST /search succeeded",
+                    search_mode=tag,
+                    item_count=len(features),
+                    duration_ms=duration_ms,
+                    http_status=resp.status_code,
+                )
                 return features
             except Exception as e:
+                status_code = None
                 err_text = ""
                 try:
                     if "resp" in locals():
-                        err_text = resp.text[:500]
+                        status_code = resp.status_code
+                        err_text = safe_text_snippet(resp.text, limit=300)
                 except Exception:
                     err_text = ""
-                if err_text:
-                    print(f"[STAC] POST /search ({tag}) that bai ({e}). body={err_text}")
-                else:
-                    print(f"[STAC] POST /search ({tag}) that bai ({e})")
+                emit_runtime_log(
+                    "query_stac_download",
+                    logging.WARNING,
+                    "STAC POST /search failed",
+                    search_mode=tag,
+                    http_status=status_code,
+                    error=e,
+                    response_body=err_text or None,
+                )
                 return None
 
         # Luu y: nhieu STAC backend khong chap nhan gui dong thoi bbox + intersects.
@@ -362,7 +771,15 @@ class STACClient:
             if out is not None:
                 return out
 
-        print("[STAC] POST /search that bai, thu GET fallback...")
+        emit_runtime_log(
+            "query_stac_download",
+            logging.WARNING,
+            "Falling back to STAC GET items after POST /search failed",
+            collection=collection,
+            datetime=datetime_range,
+            has_bbox=bool(bbox),
+            has_query=bool(query),
+        )
 
         items_url = f"{self.api_url}/collections/{collection}/items"
         params: Dict[str, Any] = {"limit": max(1, int(limit))}
@@ -376,14 +793,31 @@ class STACClient:
             params["query"] = json.dumps(query)
 
         try:
+            request_started = datetime.now()
             resp = self.session.get(items_url, params=params, timeout=60)
             resp.raise_for_status()
             data = resp.json()
             features = data.get("features", [])
-            print(f"[STAC] GET items -> {len(features)} items")
+            duration_ms = int((datetime.now() - request_started).total_seconds() * 1000)
+            emit_runtime_log(
+                "query_stac_download",
+                logging.INFO,
+                "STAC GET items succeeded",
+                item_count=len(features),
+                duration_ms=duration_ms,
+                http_status=resp.status_code,
+            )
             return features
         except Exception as e:
-            print(f"[Loi] Khong the query STAC API: {e}")
+            emit_runtime_log(
+                "query_stac_download",
+                logging.ERROR,
+                "Unable to query STAC API",
+                error=e,
+                collection=collection,
+                datetime=datetime_range,
+                has_bbox=bool(bbox),
+            )
             return []
 
     def get_item(self, collection: str, item_id: str) -> Optional[Dict[str, Any]]:
@@ -392,6 +826,14 @@ class STACClient:
         try:
             resp = self.session.get(direct_url, timeout=30)
             if resp.status_code == 200:
+                emit_runtime_log(
+                    "query_stac_download",
+                    logging.DEBUG,
+                    "Fetched STAC item by direct endpoint",
+                    collection=collection,
+                    item_id=item_id,
+                    http_status=resp.status_code,
+                )
                 return resp.json()
         except Exception:
             pass
@@ -403,11 +845,25 @@ class STACClient:
             if resp.status_code == 200:
                 features = resp.json().get("features", [])
                 if features:
+                    emit_runtime_log(
+                        "query_stac_download",
+                        logging.DEBUG,
+                        "Fetched STAC item by ids extension fallback",
+                        collection=collection,
+                        item_id=item_id,
+                    )
                     return features[0]
         except Exception:
             pass
 
         # Fallback 2: query id eq
+        emit_runtime_log(
+            "query_stac_download",
+            logging.DEBUG,
+            "Falling back to STAC id query",
+            collection=collection,
+            item_id=item_id,
+        )
         features = self.search_items(
             collection=collection,
             limit=1,
@@ -426,35 +882,73 @@ def apply_hard_filters(
 ) -> List[Dict[str, Any]]:
     """Loc cac dieu kien bat buoc cho input model."""
     result: List[Dict[str, Any]] = []
+    rejection_counts: Dict[str, int] = defaultdict(int)
+    rejection_item_ids: Dict[str, List[str]] = defaultdict(list)
     for item in items:
         info = extract_item_info(item)
+        item_id = str(info.get("id") or "unknown")
 
         if instrument_mode and info["instrument_mode"].upper() != instrument_mode.upper():
+            rejection_counts["instrument_mode_mismatch"] += 1
+            rejection_item_ids["instrument_mode_mismatch"].append(item_id)
             continue
         if product_type and info["product_type"].upper() != product_type.upper():
+            rejection_counts["product_type_mismatch"] += 1
+            rejection_item_ids["product_type_mismatch"].append(item_id)
             continue
         if orbit_state and str(info["orbit_state"]).lower() != orbit_state.lower():
+            rejection_counts["orbit_state_mismatch"] += 1
+            rejection_item_ids["orbit_state_mismatch"].append(item_id)
             continue
         if relative_orbit is not None and info["relative_orbit"] != relative_orbit:
+            rejection_counts["relative_orbit_mismatch"] += 1
+            rejection_item_ids["relative_orbit_mismatch"].append(item_id)
             continue
 
         item_pols = [str(p).upper() for p in info["polarizations"]]
         if not all(pol in item_pols for pol in required_pols):
+            rejection_counts["missing_polarization"] += 1
+            rejection_item_ids["missing_polarization"].append(item_id)
             continue
 
         # Item phai co href cho tat ca polarization can dung
         if any(select_asset_href(item, pol) is None for pol in required_pols):
+            rejection_counts["missing_asset_href"] += 1
+            rejection_item_ids["missing_asset_href"].append(item_id)
             continue
 
         result.append(item)
 
-    print(f"[FILTER] {len(items)} items -> {len(result)} sau hard filters")
+    emit_runtime_log(
+        "query_stac_download",
+        logging.INFO,
+        "Applied hard filters to STAC items",
+        input_items=len(items),
+        kept_items=len(result),
+        rejected_items=max(0, len(items) - len(result)),
+        rejection_counts=dict(sorted(rejection_counts.items())),
+        orbit_state=orbit_state,
+        relative_orbit=relative_orbit,
+        required_pols=[str(pol).upper() for pol in required_pols],
+        instrument_mode=instrument_mode,
+        product_type=product_type,
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        for reason_key, item_ids in sorted(rejection_item_ids.items()):
+            emit_runtime_log(
+                "query_stac_download",
+                logging.DEBUG,
+                "Hard-filter rejection bucket",
+                reason=reason_key,
+                item_ids=sorted(item_ids),
+            )
     return result
 
 
 def find_pairs(
     items: List[Dict[str, Any]],
     aoi_bbox: List[float],
+    aoi_geometry: Dict[str, Any],
     min_overlap: float,
     min_aoi_coverage: float,
     max_delta_days: int,
@@ -465,7 +959,7 @@ def find_pairs(
     """
     Tim cap T1/T2 hop le.
     Dieu kien:
-      - AOI bbox coverage cua T1 va T2 >= min_aoi_coverage
+      - AOI geometry coverage cua T1 va T2 > min_aoi_coverage
       - min_delta_hours <= Delta t <= max_delta_days
       - Datatake duoc ghi lai de chan doan, khong dung lam hard filter
       - bbox_overlap chi duoc luu lai de report/ranking, khong la hard filter
@@ -474,6 +968,7 @@ def find_pairs(
     min_delta_sec = max(0.0, float(min_delta_hours) * 3600.0)
     max_delta_sec = max(0.0, float(max_delta_days) * 86400.0)
     sorted_items = sorted(items, key=lambda it: parse_datetime_utc(extract_item_info(it)["datetime"]))
+    annotate_items_for_aoi(sorted_items, aoi_geometry, aoi_bbox=aoi_bbox)
     print(f"[PAIR] Candidate items sau filter: {len(sorted_items)}")
 
     for i in range(len(sorted_items) - 1):
@@ -505,10 +1000,13 @@ def find_pairs(
 
             overlap = bbox_overlap_ratio(bbox1, bbox2)
 
-            cover_t1 = coverage_ratio(aoi_bbox, bbox1)
-            cover_t2 = coverage_ratio(aoi_bbox, bbox2)
-            if cover_t1 < min_aoi_coverage or cover_t2 < min_aoi_coverage:
+            cover_t1 = item_aoi_coverage_value(item_t1)
+            cover_t2 = item_aoi_coverage_value(item_t2)
+            if cover_t1 <= min_aoi_coverage or cover_t2 <= min_aoi_coverage:
                 continue
+            bbox_cover_t1 = item_aoi_bbox_coverage_value(item_t1)
+            bbox_cover_t2 = item_aoi_bbox_coverage_value(item_t2)
+            pair_union_coverage = items_union_coverage([item_t1, item_t2], aoi_geometry)
 
             pairs.append(
                 {
@@ -525,10 +1023,13 @@ def find_pairs(
                     "delta_hours": delta_sec / 3600.0,
                     "delta_days": delta_sec / 86400.0,
                     "bbox_overlap": overlap,
-                    "aoi_bbox_coverage_t1": cover_t1,
-                    "aoi_bbox_coverage_t2": cover_t2,
+                    "aoi_union_coverage_pair": pair_union_coverage,
+                    "aoi_bbox_coverage_t1": bbox_cover_t1,
+                    "aoi_bbox_coverage_t2": bbox_cover_t2,
                     "aoi_coverage_t1": cover_t1,
                     "aoi_coverage_t2": cover_t2,
+                    "coverage_source_t1": item_coverage_source(item_t1),
+                    "coverage_source_t2": item_coverage_source(item_t2),
                     "t1_orbit_state": info_t1["orbit_state"],
                     "t2_orbit_state": info_t2["orbit_state"],
                     "orbit_state": info_t1["orbit_state"],
@@ -542,20 +1043,24 @@ def find_pairs(
     return pairs
 
 
-def pair_rank_key(pair: Dict[str, Any]) -> Tuple[float, float, float, float, str, str]:
+def pair_rank_key(pair: Dict[str, Any]) -> Tuple[float, float, float, float, float, float, str, str]:
     """Ranking cap exact-pair theo uu tien recency.
 
     Uu tien:
       1) latest input moi nhat, tuong ung T2 trong exact pair
       2) T1 moi nhat
       3) delta nho hon
-      4) bbox overlap lon hon
-      5) ID on dinh
+      4) min AOI geometry coverage lon hon
+      5) pair union coverage lon hon
+      6) bbox overlap lon hon
+      7) ID on dinh
     """
     return (
         _neg_timestamp(pair["t2_datetime"]),
         _neg_timestamp(pair["t1_datetime"]),
         pair["delta_seconds"],
+        -min(pair.get("aoi_coverage_t1", 0.0), pair.get("aoi_coverage_t2", 0.0)),
+        -pair.get("aoi_union_coverage_pair", 0.0),
         -pair["bbox_overlap"],
         pair["t1_id"],
         pair["t2_id"],
@@ -572,10 +1077,61 @@ def build_pair_identifier(pair: Dict[str, Any]) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", raw)
 
 
+def exact_pair_later_first(pair: Dict[str, Any]) -> Dict[str, Any]:
+    """Project an internal chronological pair into canonical model order: T1=later, T2=earlier."""
+    return {
+        "t1_id": pair["t2_id"],
+        "t2_id": pair["t1_id"],
+        "t1_datetime": pair["t2_datetime"],
+        "t2_datetime": pair["t1_datetime"],
+        "later_id": pair["t2_id"],
+        "earlier_id": pair["t1_id"],
+        "later_datetime": pair["t2_datetime"],
+        "earlier_datetime": pair["t1_datetime"],
+        "t1_datatake_id": pair.get("t2_datatake_id"),
+        "t2_datatake_id": pair.get("t1_datatake_id"),
+        "t1_orbit_state": pair.get("t2_orbit_state"),
+        "t2_orbit_state": pair.get("t1_orbit_state"),
+        "relative_orbit": pair.get("relative_orbit"),
+        "slice_number": pair.get("slice_number"),
+        "delta_seconds": pair["delta_seconds"],
+        "delta_hours": pair["delta_hours"],
+        "delta_days": pair["delta_days"],
+        "bbox_overlap": pair["bbox_overlap"],
+        "aoi_union_coverage_pair": pair.get("aoi_union_coverage_pair", 0.0),
+        "aoi_bbox_coverage_t1": pair["aoi_bbox_coverage_t2"],
+        "aoi_bbox_coverage_t2": pair["aoi_bbox_coverage_t1"],
+        "aoi_coverage_t1": pair["aoi_coverage_t2"],
+        "aoi_coverage_t2": pair["aoi_coverage_t1"],
+        "coverage_source_t1": pair.get("coverage_source_t2", "none"),
+        "coverage_source_t2": pair.get("coverage_source_t1", "none"),
+        "latest_input_datetime": pair["t2_datetime"],
+    }
+
+
+def support_pair_later_first(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a support pair candidate into canonical model order: T1=later, T2=earlier."""
+    return {
+        "t1_id": candidate["support_t2_id"],
+        "t2_id": candidate["support_t1_id"],
+        "t1_datetime": candidate["support_t2_datetime"],
+        "t2_datetime": candidate["support_t1_datetime"],
+        "later_id": candidate["support_t2_id"],
+        "earlier_id": candidate["support_t1_id"],
+        "later_datetime": candidate["support_t2_datetime"],
+        "earlier_datetime": candidate["support_t1_datetime"],
+        "t1_orbit_state": candidate.get("support_t2_orbit_state"),
+        "t2_orbit_state": candidate.get("support_t1_orbit_state"),
+    }
+
+
 def build_manifest_for_pair(pair: Dict[str, Any], required_pols: List[str]) -> Optional[Dict[str, Any]]:
     """Build manifest bao gom href theo tung polarization cho T1/T2."""
-    t1_item = pair["t1_item"]
-    t2_item = pair["t2_item"]
+    # Internal pair ordering is chronological earlier -> later.
+    # Public manifest ordering is canonical model order: T1=later, T2=earlier.
+    t1_item = pair["t2_item"]
+    t2_item = pair["t1_item"]
+    canonical = exact_pair_later_first(pair)
 
     assets: Dict[str, Dict[str, Any]] = {}
     for pol in required_pols:
@@ -595,22 +1151,35 @@ def build_manifest_for_pair(pair: Dict[str, Any], required_pols: List[str]) -> O
     pair_id = build_pair_identifier(pair)
     return {
         "pair_id": pair_id,
-        "t1_id": pair["t1_id"],
-        "t2_id": pair["t2_id"],
-        "t1_datetime": pair["t1_datetime"],
-        "t2_datetime": pair["t2_datetime"],
-        "latest_input_datetime": pair["t2_datetime"],
-        "t1_datatake_id": pair.get("t1_datatake_id"),
-        "t2_datatake_id": pair.get("t2_datatake_id"),
+        "t1_id": canonical["t1_id"],
+        "t2_id": canonical["t2_id"],
+        "t1_datetime": canonical["t1_datetime"],
+        "t2_datetime": canonical["t2_datetime"],
+        "later_id": canonical["later_id"],
+        "earlier_id": canonical["earlier_id"],
+        "later_datetime": canonical["later_datetime"],
+        "earlier_datetime": canonical["earlier_datetime"],
+        "pair_semantics": {
+            "t1_role": "later/posterior exact scene",
+            "t2_role": "earlier/prior exact scene",
+            "matches_training_semantics": True,
+            "recipe_type": "exact_single_scene",
+        },
+        "latest_input_datetime": canonical["latest_input_datetime"],
+        "t1_datatake_id": canonical.get("t1_datatake_id"),
+        "t2_datatake_id": canonical.get("t2_datatake_id"),
         "delta_hours": pair["delta_hours"],
         "delta_days": pair["delta_days"],
         "bbox_overlap": pair["bbox_overlap"],
-        "aoi_bbox_coverage_t1": pair["aoi_bbox_coverage_t1"],
-        "aoi_bbox_coverage_t2": pair["aoi_bbox_coverage_t2"],
-        "aoi_coverage_t1": pair["aoi_coverage_t1"],
-        "aoi_coverage_t2": pair["aoi_coverage_t2"],
-        "t1_orbit_state": pair.get("t1_orbit_state"),
-        "t2_orbit_state": pair.get("t2_orbit_state"),
+        "aoi_union_coverage_pair": canonical.get("aoi_union_coverage_pair", 0.0),
+        "aoi_bbox_coverage_t1": canonical["aoi_bbox_coverage_t1"],
+        "aoi_bbox_coverage_t2": canonical["aoi_bbox_coverage_t2"],
+        "aoi_coverage_t1": canonical["aoi_coverage_t1"],
+        "aoi_coverage_t2": canonical["aoi_coverage_t2"],
+        "coverage_source_t1": canonical.get("coverage_source_t1", "none"),
+        "coverage_source_t2": canonical.get("coverage_source_t2", "none"),
+        "t1_orbit_state": canonical.get("t1_orbit_state"),
+        "t2_orbit_state": canonical.get("t2_orbit_state"),
         "orbit_state": pair["orbit_state"],
         "relative_orbit": pair["relative_orbit"],
         "slice_number": pair["slice_number"],
@@ -624,14 +1193,34 @@ class S3Downloader:
     def __init__(self):
         if boto3 is None:
             raise RuntimeError("Chua cai boto3. Vui long cai 'pip install boto3' de dung tinh nang download.")
+        access_key = os.getenv("S3_ACCESS_KEY")
+        secret_key = os.getenv("S3_SECRET_KEY")
         client_kwargs: Dict[str, Any] = {
-            "aws_access_key_id": os.getenv("S3_ACCESS_KEY"),
-            "aws_secret_access_key": os.getenv("S3_SECRET_KEY"),
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
         }
         s3_endpoint = os.getenv("S3_ENDPOINT")
         if s3_endpoint:
             client_kwargs["endpoint_url"] = s3_endpoint
-            print(f"[S3] Endpoint: {s3_endpoint}")
+        credential_source = detect_s3_credential_source()
+        emit_runtime_log(
+            "query_stac_download",
+            logging.INFO,
+            "Initialized S3 downloader",
+            s3_endpoint=s3_endpoint,
+            credential_source=credential_source,
+            s3_access_key_present=bool(access_key),
+            s3_secret_key_present=bool(secret_key),
+            explicit_env_present=bool(access_key and secret_key),
+        )
+        if credential_source == "none":
+            emit_runtime_log(
+                "query_stac_download",
+                logging.WARNING,
+                "S3 credentials are not explicitly configured",
+                credential_source=credential_source,
+                note="The pipeline will continue and only fail if S3 access is required later.",
+            )
         self.client = boto3.client("s3", **client_kwargs)
 
     @staticmethod
@@ -659,22 +1248,49 @@ class S3Downloader:
         """Tai file tu href ve local_path."""
         parsed = self.parse_href_to_bucket_key(href)
         if not parsed:
-            print(f"  [Loi] Khong parse duoc href: {href}")
+            emit_runtime_log(
+                "query_stac_download",
+                logging.ERROR,
+                "Failed to parse asset href for download",
+                href=href,
+                local_path=local_path,
+            )
             return False
         bucket, key = parsed
 
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-        print(f"  Dang tai: s3://{bucket}/{key}")
-        print(f"   -> {local_path}")
+        emit_runtime_log(
+            "query_stac_download",
+            logging.INFO,
+            "Starting S3 asset download",
+            href=href,
+            bucket=bucket,
+            key=key,
+            local_path=local_path,
+        )
 
         try:
             head = self.client.head_object(Bucket=bucket, Key=key)
             size_mb = head["ContentLength"] / (1024 * 1024)
-            print(f"   Size: {size_mb:.1f} MB")
+            emit_runtime_log(
+                "query_stac_download",
+                logging.INFO,
+                "Resolved S3 object metadata",
+                bucket=bucket,
+                key=key,
+                size_mb=f"{size_mb:.1f}",
+            )
 
             local_file = Path(local_path)
             if local_file.exists() and local_file.stat().st_size == int(head["ContentLength"]):
-                print("   Skip: file da ton tai va du kich thuoc.")
+                emit_runtime_log(
+                    "query_stac_download",
+                    logging.INFO,
+                    "Skipping download because local file already matches remote size",
+                    bucket=bucket,
+                    key=key,
+                    local_path=local_path,
+                )
                 return True
 
             downloaded = [0]
@@ -687,13 +1303,36 @@ class S3Downloader:
                 bucket_pct = int(pct // 5) * 5
                 if bucket_pct > progress_state["last_print"]:
                     progress_state["last_print"] = bucket_pct
-                    print(f"   Progress: {pct:.1f}%")
+                    emit_runtime_log(
+                        "query_stac_download",
+                        logging.DEBUG,
+                        "S3 download progress",
+                        bucket=bucket,
+                        key=key,
+                        progress_pct=f"{pct:.1f}",
+                    )
 
             self.client.download_file(bucket, key, local_path, Callback=progress)
-            print(f"\n  OK: {local_path}")
+            emit_runtime_log(
+                "query_stac_download",
+                logging.INFO,
+                "Completed S3 asset download",
+                bucket=bucket,
+                key=key,
+                local_path=local_path,
+            )
             return True
         except Exception as e:
-            print(f"\n  [Loi] Download that bai: {e}")
+            emit_runtime_log(
+                "query_stac_download",
+                logging.ERROR,
+                "S3 asset download failed",
+                href=href,
+                bucket=bucket,
+                key=key,
+                local_path=local_path,
+                error=e,
+            )
             return False
 
     def download_aoi_subset_from_href(
@@ -727,7 +1366,13 @@ class S3Downloader:
             with env:
                 with rasterio.open(raster_path, "r") as src:
                     if src.crs is None:
-                        print("  [Loi] Raster khong co CRS, khong the subset theo AOI.")
+                        emit_runtime_log(
+                            "query_stac_download",
+                            logging.ERROR,
+                            "Subset failed because raster has no CRS",
+                            href=href,
+                            local_path=local_path,
+                        )
                         return False
 
                     aoi_in_src = transform_geom("EPSG:4326", src.crs, aoi_geometry_wgs84, antimeridian_cutting=True, precision=15)
@@ -735,7 +1380,14 @@ class S3Downloader:
                     src_bounds = [src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top]
                     clip_bbox = bbox_intersection_bounds(aoi_bounds_src, src_bounds)
                     if clip_bbox is None:
-                        print("  [Loi] AOI khong giao voi item bounds sau khi doi CRS.")
+                        emit_runtime_log(
+                            "query_stac_download",
+                            logging.WARNING,
+                            "Subset skipped because AOI does not intersect raster bounds",
+                            href=href,
+                            local_path=local_path,
+                            raster_crs=src.crs,
+                        )
                         return False
 
                     # Snap outward theo pixel grid:
@@ -760,7 +1412,13 @@ class S3Downloader:
                         height=max(0, row_max - row_off),
                     )
                     if win.width < 1 or win.height < 1:
-                        print("  [Loi] Cua so subset rong sau khi clip.")
+                        emit_runtime_log(
+                            "query_stac_download",
+                            logging.ERROR,
+                            "Subset failed because clipped raster window is empty",
+                            href=href,
+                            local_path=local_path,
+                        )
                         return False
 
                     data = src.read(window=win)
@@ -782,10 +1440,27 @@ class S3Downloader:
                     out_file.parent.mkdir(parents=True, exist_ok=True)
                     with rasterio.open(out_file, "w", **profile) as dst:
                         dst.write(data)
-            print(f"  OK subset AOI: {local_path}")
+            emit_runtime_log(
+                "query_stac_download",
+                logging.INFO,
+                "Completed AOI subset download",
+                href=href,
+                local_path=local_path,
+                raster_path=raster_path,
+            )
             return True
         except Exception as e:
-            print(f"  [Loi] Subset AOI that bai: {e}")
+            parsed = self.parse_href_to_bucket_key(href)
+            emit_runtime_log(
+                "query_stac_download",
+                logging.ERROR,
+                "AOI subset download failed",
+                href=href,
+                bucket=(parsed[0] if parsed else None),
+                key=(parsed[1] if parsed else None),
+                local_path=local_path,
+                error=e,
+            )
             return False
 
     def download_item_assets(
@@ -800,7 +1475,13 @@ class S3Downloader:
         keys = asset_keys or list(assets.keys())
         for key in keys:
             if key not in assets:
-                print(f"  [!] Asset key '{key}' khong ton tai, bo qua")
+                emit_runtime_log(
+                    "query_stac_download",
+                    logging.WARNING,
+                    "Requested asset key is missing from STAC item",
+                    asset_key=key,
+                    item_id=item_id,
+                )
                 continue
             asset = assets[key]
             href = str(asset.get("href", ""))
@@ -886,8 +1567,13 @@ def resolve_spatial_filter(args: argparse.Namespace) -> Tuple[Optional[List[floa
     """
     if getattr(args, "geojson", None):
         bbox, geometry = load_geojson_aoi(args.geojson)
-        print(f"[AOI] GeoJSON: {args.geojson}")
-        print(f"[AOI] bbox: {bbox}")
+        emit_runtime_log(
+            "query_stac_download",
+            logging.INFO,
+            "Resolved AOI spatial filter from GeoJSON",
+            geojson_path=args.geojson,
+            bbox=bbox,
+        )
         return bbox, geometry
     return args.bbox, None
 
@@ -896,11 +1582,29 @@ def collect_items_with_filters(
     client: STACClient,
     args: argparse.Namespace,
     required_pols: List[str],
-) -> Tuple[List[Dict[str, Any]], List[float]]:
-    """Chay query + hard filter, tra ve items va AOI bbox dung de rank."""
+) -> Tuple[List[Dict[str, Any]], List[float], Dict[str, Any]]:
+    """Chay query + hard filter, tra ve items, AOI bbox canonical, va AOI geometry canonical."""
     bbox, intersects = resolve_spatial_filter(args)
     if bbox is None:
         raise ValueError("Can --bbox hoac --geojson de xac dinh AOI.")
+    aoi_geometry = intersects or bbox_to_geometry(bbox)
+
+    temporal_items_count: Optional[int] = None
+    if intersects is not None:
+        temporal_only_items = client.search_items(
+            collection=args.collection,
+            datetime_range=args.datetime,
+            limit=args.limit,
+        )
+        temporal_items_count = len(temporal_only_items)
+        emit_runtime_log(
+            "query_stac_download",
+            logging.INFO,
+            "Temporal-only STAC query completed",
+            collection=args.collection,
+            datetime=args.datetime,
+            temporal_items=temporal_items_count,
+        )
 
     items = client.search_items(
         collection=args.collection,
@@ -909,8 +1613,19 @@ def collect_items_with_filters(
         datetime_range=args.datetime,
         limit=args.limit,
     )
+    emit_runtime_log(
+        "query_stac_download",
+        logging.INFO,
+        "Spatial STAC query completed",
+        collection=args.collection,
+        datetime=args.datetime,
+        spatial_items=len(items),
+        temporal_items=temporal_items_count,
+        bbox=bbox,
+        used_intersects=bool(intersects),
+    )
     if not items:
-        return [], bbox
+        return [], bbox, aoi_geometry
 
     filtered = apply_hard_filters(
         items=items,
@@ -918,7 +1633,16 @@ def collect_items_with_filters(
         relative_orbit=args.rel_orbit,
         required_pols=required_pols,
     )
-    return filtered, bbox
+    annotate_items_for_aoi(filtered, aoi_geometry, aoi_bbox=bbox)
+    emit_runtime_log(
+        "query_stac_download",
+        logging.INFO,
+        "STAC query pipeline counts",
+        temporal_items=temporal_items_count,
+        spatial_items=len(items),
+        hard_filtered_items=len(filtered),
+    )
+    return filtered, bbox, aoi_geometry
 
 
 def print_pairs_table(pairs: List[Dict[str, Any]], top_k: int = 10) -> None:
@@ -934,18 +1658,20 @@ def print_pairs_table(pairs: List[Dict[str, Any]], top_k: int = 10) -> None:
     )
     print("=" * 184)
     for idx, p in enumerate(pairs[:top_k], 1):
-        min_cov = min(p["aoi_bbox_coverage_t1"], p["aoi_bbox_coverage_t2"])
-        datatake_label = "same" if p.get("t1_datatake_id") == p.get("t2_datatake_id") else "diff"
-        orbit_label = f"{str(p.get('t1_orbit_state') or '?')[:4]}/{str(p.get('t2_orbit_state') or '?')[:4]}"
+        canonical = exact_pair_later_first(p)
+        min_cov = min(canonical["aoi_coverage_t1"], canonical["aoi_coverage_t2"])
+        datatake_label = "same" if canonical.get("t1_datatake_id") == canonical.get("t2_datatake_id") else "diff"
+        orbit_label = f"{str(canonical.get('t1_orbit_state') or '?')[:4]}/{str(canonical.get('t2_orbit_state') or '?')[:4]}"
         print(
-            f"{idx:>3} {p['t2_datetime'][:22]:<22} {p['delta_hours']:>8.2f} {p['bbox_overlap']:>8.1%} {min_cov:>8.1%} "
-            f"{datatake_label:>8} {orbit_label:>11} {p['t1_id'][:48]:<48} {p['t2_id'][:48]:<48}"
+            f"{idx:>3} {canonical['latest_input_datetime'][:22]:<22} {p['delta_hours']:>8.2f} {p['bbox_overlap']:>8.1%} {min_cov:>8.1%} "
+            f"{datatake_label:>8} {orbit_label:>11} {canonical['t1_id'][:48]:<48} {canonical['t2_id'][:48]:<48}"
         )
 
 
 def search_pairs_sorted(
     items: List[Dict[str, Any]],
     aoi_bbox: List[float],
+    aoi_geometry: Dict[str, Any],
     min_overlap: float,
     min_aoi_coverage: float,
     max_delta_days: int,
@@ -957,6 +1683,7 @@ def search_pairs_sorted(
     pairs = find_pairs(
         items=items,
         aoi_bbox=aoi_bbox,
+        aoi_geometry=aoi_geometry,
         min_overlap=min_overlap,
         min_aoi_coverage=min_aoi_coverage,
         max_delta_days=max_delta_days,
@@ -970,6 +1697,76 @@ def search_pairs_sorted(
 def midpoint_datetime(dt1: datetime, dt2: datetime) -> datetime:
     """Diem giua giua hai moc thoi gian UTC."""
     return dt1 + (dt2 - dt1) / 2
+
+
+def parse_finite_datetime_range(datetime_range: Optional[str]) -> Tuple[datetime, datetime]:
+    """Parse finite RFC3339 range and return UTC bounds."""
+    normalized = normalize_datetime_range(datetime_range)
+    if not normalized or "/" not in normalized:
+        raise ValueError("Representative calendar selection requires a finite datetime range `start/end`.")
+    start_raw, end_raw = [part.strip() for part in normalized.split("/", 1)]
+    if start_raw == ".." or end_raw == "..":
+        raise ValueError("Representative calendar selection does not support open datetime ranges (`..`).")
+    start_dt = parse_datetime_utc(start_raw)
+    end_dt = parse_datetime_utc(end_raw)
+    if start_dt == datetime.min.replace(tzinfo=timezone.utc) or end_dt == datetime.min.replace(tzinfo=timezone.utc):
+        raise ValueError(f"Invalid datetime range: {datetime_range}")
+    if start_dt >= end_dt:
+        raise ValueError(f"Datetime range must satisfy start < end, got: {datetime_range}")
+    return start_dt, end_dt
+
+
+def floor_month_utc(dt: datetime) -> datetime:
+    return dt.astimezone(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def add_month_utc(dt: datetime) -> datetime:
+    if dt.month == 12:
+        return dt.replace(year=dt.year + 1, month=1)
+    return dt.replace(month=dt.month + 1)
+
+
+def expand_month_periods(datetime_range: Optional[str], allow_partial_periods: bool = False) -> List[Dict[str, Any]]:
+    """Expand a finite datetime range into calendar-month periods."""
+    start_dt, end_dt = parse_finite_datetime_range(datetime_range)
+    inclusive_full_end = end_dt
+    if end_dt.hour == 23 and end_dt.minute == 59 and end_dt.second == 59 and end_dt.microsecond == 0:
+        inclusive_full_end = end_dt + timedelta(seconds=1)
+    periods: List[Dict[str, Any]] = []
+    cursor = floor_month_utc(start_dt)
+    while cursor < inclusive_full_end:
+        next_month = add_month_utc(cursor)
+        if allow_partial_periods:
+            period_start = max(cursor, start_dt)
+            period_end = min(next_month, inclusive_full_end)
+            is_full = period_start == cursor and period_end == next_month
+            if period_start < period_end:
+                period_anchor = midpoint_datetime(period_start, period_end)
+                periods.append(
+                    {
+                        "period_id": period_start.strftime("%Y-%m"),
+                        "period_mode": "month",
+                        "period_start": period_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "period_end": period_end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "period_anchor_datetime": period_anchor.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "is_full_period": is_full,
+                    }
+                )
+        else:
+            if start_dt <= cursor and next_month <= inclusive_full_end:
+                period_anchor = midpoint_datetime(cursor, next_month)
+                periods.append(
+                    {
+                        "period_id": cursor.strftime("%Y-%m"),
+                        "period_mode": "month",
+                        "period_start": cursor.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "period_end": next_month.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "period_anchor_datetime": period_anchor.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "is_full_period": True,
+                    }
+                )
+        cursor = next_month
+    return periods
 
 
 def item_scene_key(item: Dict[str, Any]) -> Tuple[str, str, str, str, str]:
@@ -1007,28 +1804,433 @@ def summarize_unique_scenes(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return scenes
 
 
+def scene_datetime_values(items: List[Dict[str, Any]]) -> List[str]:
+    return [extract_item_info(item)["datetime"] for item in items if extract_item_info(item).get("datetime")]
+
+
+def unique_datetime_count_from_items(items: List[Dict[str, Any]]) -> int:
+    return len({dt for dt in scene_datetime_values(items) if dt})
+
+
+def collect_period_half_items(
+    items: List[Dict[str, Any]],
+    aoi_geometry: Dict[str, Any],
+    aoi_bbox: Optional[List[float]],
+    period_start: datetime,
+    period_anchor: datetime,
+    period_end: datetime,
+    min_aoi_coverage: float,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Collect pre/post items inside one representative period."""
+    pre_items: List[Dict[str, Any]] = []
+    post_items: List[Dict[str, Any]] = []
+    annotate_items_for_aoi(items, aoi_geometry, aoi_bbox=aoi_bbox)
+    for item in items:
+        cov = item_aoi_coverage_value(item)
+        if cov <= min_aoi_coverage:
+            continue
+        info = extract_item_info(item)
+        dt = parse_datetime_utc(info["datetime"])
+        if period_start <= dt < period_anchor:
+            pre_items.append(item)
+        elif period_anchor <= dt < period_end:
+            post_items.append(item)
+    return pre_items, post_items
+
+
+def _group_signature(info: Dict[str, Any], mode: str) -> Tuple[str, ...]:
+    orbit_state = str(info.get("orbit_state") or "").lower() or "unknown"
+    rel_orbit = "" if info.get("relative_orbit") is None else str(info["relative_orbit"])
+    if mode == "orbit_state_relative_orbit":
+        return (orbit_state, rel_orbit)
+    if mode == "orbit_state_only":
+        return (orbit_state,)
+    if mode == "mixed":
+        return ("mixed",)
+    raise ValueError(f"Unsupported representative signature mode: {mode}")
+
+
+def _stable_signature_token(signature_mode: str, signature_key: Tuple[str, ...]) -> str:
+    return f"{signature_mode}:{'|'.join(signature_key)}"
+
+
+def _latest_pre_gap_hours(pre_items: List[Dict[str, Any]], anchor_dt: datetime) -> float:
+    if not pre_items:
+        return float("inf")
+    latest_pre = max(parse_datetime_utc(extract_item_info(item)["datetime"]) for item in pre_items)
+    return float((anchor_dt - latest_pre).total_seconds() / 3600.0)
+
+
+def _earliest_post_gap_hours(post_items: List[Dict[str, Any]], anchor_dt: datetime) -> float:
+    if not post_items:
+        return float("inf")
+    earliest_post = min(parse_datetime_utc(extract_item_info(item)["datetime"]) for item in post_items)
+    return float((earliest_post - anchor_dt).total_seconds() / 3600.0)
+
+
+def select_witness_support_pair(
+    pre_items: List[Dict[str, Any]],
+    post_items: List[Dict[str, Any]],
+    aoi_geometry: Dict[str, Any],
+    aoi_bbox: Optional[List[float]],
+    anchor_dt: datetime,
+) -> Optional[Dict[str, Any]]:
+    """Pick one support pair for QA/provenance after pools are chosen."""
+    annotate_items_for_aoi(pre_items, aoi_geometry, aoi_bbox=aoi_bbox)
+    annotate_items_for_aoi(post_items, aoi_geometry, aoi_bbox=aoi_bbox)
+    best_pair: Optional[Dict[str, Any]] = None
+    best_key: Optional[Tuple[float, int, int, float, str, str]] = None
+    for pre_item in pre_items:
+        pre_info = extract_item_info(pre_item)
+        pre_dt = parse_datetime_utc(pre_info["datetime"])
+        pre_cov = item_aoi_coverage_value(pre_item)
+        for post_item in post_items:
+            post_info = extract_item_info(post_item)
+            post_dt = parse_datetime_utc(post_info["datetime"])
+            post_cov = item_aoi_coverage_value(post_item)
+            if pre_dt >= anchor_dt or post_dt < anchor_dt:
+                continue
+            delta_hours = float((post_dt - pre_dt).total_seconds() / 3600.0)
+            same_rel_orbit = int(pre_info.get("relative_orbit") != post_info.get("relative_orbit"))
+            same_orbit_state = int(str(pre_info.get("orbit_state") or "").lower() != str(post_info.get("orbit_state") or "").lower())
+            rank_key = (
+                delta_hours,
+                same_rel_orbit,
+                same_orbit_state,
+                -min(pre_cov, post_cov),
+                pre_info["id"],
+                post_info["id"],
+            )
+            if best_key is None or rank_key < best_key:
+                best_key = rank_key
+                best_pair = {
+                    "support_t1_id": post_info["id"],
+                    "support_t2_id": pre_info["id"],
+                    "support_t1_datetime": post_info["datetime"],
+                    "support_t2_datetime": pre_info["datetime"],
+                    "support_pair_delta_hours": delta_hours,
+                    "support_pair_delta_days": delta_hours / 24.0,
+                    "support_t1_orbit_state": post_info.get("orbit_state"),
+                    "support_t2_orbit_state": pre_info.get("orbit_state"),
+                    "support_pair_orbit_state": post_info.get("orbit_state")
+                    if str(pre_info.get("orbit_state") or "").lower() == str(post_info.get("orbit_state") or "").lower()
+                    else f"{pre_info.get('orbit_state')}->{post_info.get('orbit_state')}",
+                    "support_pair_relative_orbit": post_info.get("relative_orbit")
+                    if pre_info.get("relative_orbit") == post_info.get("relative_orbit")
+                    else [pre_info.get("relative_orbit"), post_info.get("relative_orbit")],
+                    "support_t1_aoi_coverage": post_cov,
+                    "support_t2_aoi_coverage": pre_cov,
+                    "support_t1_aoi_bbox_coverage": item_aoi_bbox_coverage_value(post_item),
+                    "support_t2_aoi_bbox_coverage": item_aoi_bbox_coverage_value(pre_item),
+                    "support_t1_coverage_source": item_coverage_source(post_item),
+                    "support_t2_coverage_source": item_coverage_source(pre_item),
+                }
+    return best_pair
+
+
+def _representative_signature_candidates(
+    pre_items: List[Dict[str, Any]],
+    post_items: List[Dict[str, Any]],
+    aoi_geometry: Dict[str, Any],
+    aoi_bbox: Optional[List[float]],
+    anchor_dt: datetime,
+    min_scenes_per_half: int,
+    signature_mode: str,
+) -> List[Dict[str, Any]]:
+    annotate_items_for_aoi(pre_items, aoi_geometry, aoi_bbox=aoi_bbox)
+    annotate_items_for_aoi(post_items, aoi_geometry, aoi_bbox=aoi_bbox)
+    pre_groups: Dict[Tuple[str, ...], List[Dict[str, Any]]] = defaultdict(list)
+    post_groups: Dict[Tuple[str, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for item in pre_items:
+        pre_groups[_group_signature(extract_item_info(item), signature_mode)].append(item)
+    for item in post_items:
+        post_groups[_group_signature(extract_item_info(item), signature_mode)].append(item)
+
+    candidates: List[Dict[str, Any]] = []
+    for signature_key in sorted(set(pre_groups.keys()) & set(post_groups.keys())):
+        pre_group = sorted(pre_groups[signature_key], key=lambda it: parse_datetime_utc(extract_item_info(it)["datetime"]))
+        post_group = sorted(post_groups[signature_key], key=lambda it: parse_datetime_utc(extract_item_info(it)["datetime"]))
+        pre_scenes = summarize_unique_scenes(pre_group)
+        post_scenes = summarize_unique_scenes(post_group)
+        pre_scene_count = len(pre_scenes)
+        post_scene_count = len(post_scenes)
+        if pre_scene_count < min_scenes_per_half or post_scene_count < min_scenes_per_half:
+            continue
+        pre_unique_dt = unique_datetime_count_from_items(pre_group)
+        post_unique_dt = unique_datetime_count_from_items(post_group)
+        pre_anchor_gap = _latest_pre_gap_hours(pre_group, anchor_dt)
+        post_anchor_gap = _earliest_post_gap_hours(post_group, anchor_dt)
+        post_latest_dt = max(scene["datetime"] for scene in post_scenes)
+        pre_union_coverage = items_union_coverage(pre_group, aoi_geometry)
+        post_union_coverage = items_union_coverage(post_group, aoi_geometry)
+        combined_union_coverage = items_union_coverage(pre_group + post_group, aoi_geometry)
+        candidates.append(
+            {
+                "signature_mode": signature_mode,
+                "signature_key": signature_key,
+                "signature_token": _stable_signature_token(signature_mode, signature_key),
+                "pre_items": pre_group,
+                "post_items": post_group,
+                "pre_scenes": pre_scenes,
+                "post_scenes": post_scenes,
+                "pre_scene_count": pre_scene_count,
+                "post_scene_count": post_scene_count,
+                "pre_unique_datetime_count": pre_unique_dt,
+                "post_unique_datetime_count": post_unique_dt,
+                "pre_anchor_gap_hours": pre_anchor_gap,
+                "post_anchor_gap_hours": post_anchor_gap,
+                "pre_union_coverage": pre_union_coverage,
+                "post_union_coverage": post_union_coverage,
+                "combined_union_coverage": combined_union_coverage,
+                "post_latest_scene_datetime": post_latest_dt,
+            }
+        )
+    candidates.sort(
+        key=lambda cand: (
+            -min(cand["pre_scene_count"], cand["post_scene_count"]),
+            abs(cand["pre_scene_count"] - cand["post_scene_count"]),
+            -min(cand["pre_unique_datetime_count"], cand["post_unique_datetime_count"]),
+            -min(cand["pre_union_coverage"], cand["post_union_coverage"]),
+            -cand["combined_union_coverage"],
+            min(cand["pre_anchor_gap_hours"], cand["post_anchor_gap_hours"]),
+            _neg_timestamp(cand["post_latest_scene_datetime"]),
+            cand["signature_token"],
+        )
+    )
+    return candidates
+
+
+def select_representative_scene_pools(
+    pre_items: List[Dict[str, Any]],
+    post_items: List[Dict[str, Any]],
+    aoi_geometry: Dict[str, Any],
+    aoi_bbox: Optional[List[float]],
+    anchor_dt: datetime,
+    min_scenes_per_half: int,
+    auto_relax_inside_period: bool,
+    require_same_orbit_direction: bool = False,
+    representative_pool_mode: str = "auto",
+) -> Optional[Dict[str, Any]]:
+    """Select monthly representative scene pools with an in-period relaxation ladder."""
+    representative_pool_mode = normalize_representative_pool_mode(representative_pool_mode)
+    emit_runtime_log(
+        "query_stac_download",
+        logging.INFO,
+        "Selecting representative scene pools",
+        representative_pool_mode=representative_pool_mode,
+        pre_items=len(pre_items),
+        post_items=len(post_items),
+        min_scenes_per_half=min_scenes_per_half,
+        auto_relax_inside_period=auto_relax_inside_period,
+        require_same_orbit_direction=require_same_orbit_direction,
+        anchor_datetime=anchor_dt.isoformat().replace("+00:00", "Z"),
+    )
+
+    default_levels = [
+        {
+            "level": 0,
+            "level_name": "same_orbit_state_and_relative_orbit",
+            "signature_mode": "orbit_state_relative_orbit",
+            "required_scene_count": max(2, int(min_scenes_per_half)),
+        },
+        {
+            "level": 1,
+            "level_name": "same_orbit_state_only",
+            "signature_mode": "orbit_state_only",
+            "required_scene_count": max(2, int(min_scenes_per_half)),
+        },
+        {
+            "level": 2,
+            "level_name": "same_orbit_state_one_scene_min",
+            "signature_mode": "orbit_state_only",
+            "required_scene_count": 1,
+        },
+        {
+            "level": 3,
+            "level_name": "mixed_orbit_allowed",
+            "signature_mode": "mixed",
+            "required_scene_count": 1,
+        },
+    ]
+    if representative_pool_mode == "mixed":
+        if require_same_orbit_direction:
+            raise ValueError(
+                "representative_pool_mode='mixed' cannot be combined with require_same_orbit_direction=True."
+            )
+        levels = [
+            {
+                "level": 100,
+                "level_name": "forced_mixed_orbit_all_pre_post",
+                "signature_mode": "mixed",
+                "required_scene_count": max(1, int(min_scenes_per_half)),
+            }
+        ]
+    elif representative_pool_mode == "orbit_only":
+        levels = list(default_levels[:3])
+        if not auto_relax_inside_period:
+            levels = levels[:1]
+    else:
+        levels = list(default_levels)
+        if require_same_orbit_direction:
+            levels = [level for level in levels if level["signature_mode"] != "mixed"]
+        if not auto_relax_inside_period:
+            levels = levels[:1]
+
+    for level_cfg in levels:
+        candidates = _representative_signature_candidates(
+            pre_items=pre_items,
+            post_items=post_items,
+            aoi_geometry=aoi_geometry,
+            aoi_bbox=aoi_bbox,
+            anchor_dt=anchor_dt,
+            min_scenes_per_half=level_cfg["required_scene_count"],
+            signature_mode=level_cfg["signature_mode"],
+        )
+        if not candidates:
+            emit_runtime_log(
+                "query_stac_download",
+                logging.DEBUG,
+                "Representative selection level produced no candidates",
+                level_name=level_cfg["level_name"],
+                signature_mode=level_cfg["signature_mode"],
+                required_scene_count=level_cfg["required_scene_count"],
+            )
+            continue
+        chosen = candidates[0]
+        witness_pair = select_witness_support_pair(
+            chosen["pre_items"],
+            chosen["post_items"],
+            aoi_geometry,
+            aoi_bbox,
+            anchor_dt,
+        )
+        chosen.update(
+            {
+                "selected_relaxation_level": level_cfg["level"],
+                "selected_relaxation_name": level_cfg["level_name"],
+                "required_scene_count": level_cfg["required_scene_count"],
+                "scene_signature_mode": level_cfg["signature_mode"],
+                "scene_signature_value": list(chosen["signature_key"]),
+                "witness_support_pair": witness_pair,
+            }
+        )
+        emit_runtime_log(
+            "query_stac_download",
+            logging.INFO,
+            "Selected representative scene pools",
+            selected_relaxation_name=level_cfg["level_name"],
+            selected_relaxation_level=level_cfg["level"],
+            scene_signature_mode=level_cfg["signature_mode"],
+            required_scene_count=level_cfg["required_scene_count"],
+            pre_scene_count=chosen["pre_scene_count"],
+            post_scene_count=chosen["post_scene_count"],
+            pre_ids=[scene.get("id") for scene in chosen["pre_scenes"]],
+            post_ids=[scene.get("id") for scene in chosen["post_scenes"]],
+        )
+        return chosen
+    emit_runtime_log(
+        "query_stac_download",
+        logging.WARNING,
+        "No valid representative scene pools remained",
+        representative_pool_mode=representative_pool_mode,
+        pre_items=len(pre_items),
+        post_items=len(post_items),
+        min_scenes_per_half=min_scenes_per_half,
+    )
+    return None
+
+
+def build_representative_period_manifest(
+    *,
+    period: Dict[str, Any],
+    selection: Dict[str, Any],
+    aoi_bbox: List[float],
+    geojson_path: Optional[str],
+    required_pols: List[str],
+) -> Dict[str, Any]:
+    """Build manifest for one representative calendar period."""
+    witness = selection.get("witness_support_pair") or {}
+    return {
+        "manifest_type": "representative_calendar_period",
+        "anchor_source": "fixed_period_midpoint",
+        "anchor_strategy": "calendar_period_midpoint",
+        "selection_strategy": "representative_calendar_period",
+        "selection_priority": "balanced_period_representation",
+        "period_id": period["period_id"],
+        "period_mode": period["period_mode"],
+        "period_start": period["period_start"],
+        "period_end": period["period_end"],
+        "period_anchor_datetime": period["period_anchor_datetime"],
+        "anchor_datetime": period["period_anchor_datetime"],
+        "pair_id": f"period_{period['period_id']}",
+        "period_boundary_policy": "clip_inside_period",
+        "period_split_policy": "first_half_vs_second_half",
+        "aoi_bbox": aoi_bbox,
+        "aoi_geojson": str(Path(geojson_path).resolve()) if geojson_path else None,
+        "required_polarizations": required_pols,
+        "required_scene_count": selection["required_scene_count"],
+        "selected_relaxation_level": selection["selected_relaxation_level"],
+        "selected_relaxation_name": selection["selected_relaxation_name"],
+        "scene_signature_mode": selection["scene_signature_mode"],
+        "scene_signature_value": selection["scene_signature_value"],
+        "pre_scene_count": selection["pre_scene_count"],
+        "post_scene_count": selection["post_scene_count"],
+        "pre_unique_datetime_count": selection["pre_unique_datetime_count"],
+        "post_unique_datetime_count": selection["post_unique_datetime_count"],
+        "pre_anchor_gap_hours": selection["pre_anchor_gap_hours"],
+        "post_anchor_gap_hours": selection["post_anchor_gap_hours"],
+        "pre_union_coverage": selection.get("pre_union_coverage", 0.0),
+        "post_union_coverage": selection.get("post_union_coverage", 0.0),
+        "combined_union_coverage": selection.get("combined_union_coverage", 0.0),
+        "latest_input_datetime": selection["post_latest_scene_datetime"],
+        "pre_scenes": selection["pre_scenes"],
+        "post_scenes": selection["post_scenes"],
+        "support_t1_id": witness.get("support_t1_id"),
+        "support_t2_id": witness.get("support_t2_id"),
+        "support_t1_datetime": witness.get("support_t1_datetime"),
+        "support_t2_datetime": witness.get("support_t2_datetime"),
+        "support_pair_delta_hours": witness.get("support_pair_delta_hours"),
+        "support_pair_delta_days": witness.get("support_pair_delta_days"),
+        "support_pair_orbit_state": witness.get("support_pair_orbit_state"),
+        "support_pair_relative_orbit": witness.get("support_pair_relative_orbit"),
+        "support_t1_aoi_coverage": witness.get("support_t1_aoi_coverage"),
+        "support_t2_aoi_coverage": witness.get("support_t2_aoi_coverage"),
+        "support_t1_aoi_bbox_coverage": witness.get("support_t1_aoi_bbox_coverage"),
+        "support_t2_aoi_bbox_coverage": witness.get("support_t2_aoi_bbox_coverage"),
+        "support_t1_coverage_source": witness.get("support_t1_coverage_source"),
+        "support_t2_coverage_source": witness.get("support_t2_coverage_source"),
+        "support_pair_semantics": {
+            "t1_role": "later/posterior witness scene from second half of period",
+            "t2_role": "earlier/prior witness scene from first half of period",
+        },
+        "model_input_semantics": {
+            "s1t1_role": "post/later second half of the same calendar period",
+            "s1t2_role": "pre/earlier first half of the same calendar period",
+        },
+    }
+
+
 def collect_anchor_window_items(
     items: List[Dict[str, Any]],
-    aoi_bbox: List[float],
+    aoi_geometry: Dict[str, Any],
+    aoi_bbox: Optional[List[float]],
     anchor_dt: datetime,
     window_before_days: float,
     window_after_days: float,
     min_aoi_coverage: float,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Lay item full-AOI trong 2 cua so quanh anchor."""
+    """Lay item giao AOI geometry trong 2 cua so quanh anchor."""
     pre_start = anchor_dt - timedelta(days=float(window_before_days))
     post_end = anchor_dt + timedelta(days=float(window_after_days))
     pre_items: List[Dict[str, Any]] = []
     post_items: List[Dict[str, Any]] = []
+    annotate_items_for_aoi(items, aoi_geometry, aoi_bbox=aoi_bbox)
 
     for item in items:
+        cov = item_aoi_coverage_value(item)
+        if cov <= min_aoi_coverage:
+            continue
         info = extract_item_info(item)
-        bbox = info["bbox"]
-        if len(bbox) != 4:
-            continue
-        cov = coverage_ratio(aoi_bbox, bbox)
-        if cov < min_aoi_coverage:
-            continue
         dt = parse_datetime_utc(info["datetime"])
         if pre_start <= dt < anchor_dt:
             pre_items.append(item)
@@ -1068,6 +2270,7 @@ def anchor_rank_key(candidate: Dict[str, Any]) -> Tuple[float, float, float, flo
 def suggest_trainlike_anchors(
     items: List[Dict[str, Any]],
     aoi_bbox: List[float],
+    aoi_geometry: Dict[str, Any],
     window_before_days: float,
     window_after_days: float,
     min_aoi_coverage: float,
@@ -1082,6 +2285,7 @@ def suggest_trainlike_anchors(
     """
     candidates: List[Dict[str, Any]] = []
     sorted_items = sorted(items, key=lambda it: parse_datetime_utc(extract_item_info(it)["datetime"]))
+    annotate_items_for_aoi(sorted_items, aoi_geometry, aoi_bbox=aoi_bbox)
     min_delta_sec = max(0.0, float(min_delta_hours) * 3600.0)
     max_support_gap_sec = max(0.0, float(window_before_days + window_after_days) * 86400.0)
 
@@ -1089,7 +2293,7 @@ def suggest_trainlike_anchors(
         item_t1 = sorted_items[i]
         info_t1 = extract_item_info(item_t1)
         bbox1 = info_t1["bbox"]
-        if len(bbox1) != 4 or coverage_ratio(aoi_bbox, bbox1) < min_aoi_coverage:
+        if len(bbox1) != 4 or item_aoi_coverage_value(item_t1) <= min_aoi_coverage:
             continue
         dt1 = parse_datetime_utc(info_t1["datetime"])
 
@@ -1097,7 +2301,7 @@ def suggest_trainlike_anchors(
             item_t2 = sorted_items[j]
             info_t2 = extract_item_info(item_t2)
             bbox2 = info_t2["bbox"]
-            if len(bbox2) != 4 or coverage_ratio(aoi_bbox, bbox2) < min_aoi_coverage:
+            if len(bbox2) != 4 or item_aoi_coverage_value(item_t2) <= min_aoi_coverage:
                 continue
             dt2 = parse_datetime_utc(info_t2["datetime"])
 
@@ -1116,6 +2320,7 @@ def suggest_trainlike_anchors(
             anchor_dt = midpoint_datetime(dt1, dt2)
             pre_items, post_items = collect_anchor_window_items(
                 items=sorted_items,
+                aoi_geometry=aoi_geometry,
                 aoi_bbox=aoi_bbox,
                 anchor_dt=anchor_dt,
                 window_before_days=window_before_days,
@@ -1153,8 +2358,11 @@ def suggest_trainlike_anchors(
                     "support_t2_orbit_state": info_t2["orbit_state"],
                     "support_t1_platform": info_t1["platform"],
                     "support_t2_platform": info_t2["platform"],
-                    "aoi_bbox_coverage_t1": coverage_ratio(aoi_bbox, bbox1),
-                    "aoi_bbox_coverage_t2": coverage_ratio(aoi_bbox, bbox2),
+                    "aoi_bbox_coverage_t1": item_aoi_bbox_coverage_value(item_t1),
+                    "aoi_bbox_coverage_t2": item_aoi_bbox_coverage_value(item_t2),
+                    "aoi_coverage_t1": item_aoi_coverage_value(item_t1),
+                    "aoi_coverage_t2": item_aoi_coverage_value(item_t2),
+                    "aoi_union_coverage_pair": items_union_coverage([item_t1, item_t2], aoi_geometry),
                 }
             )
 
@@ -1170,6 +2378,7 @@ def build_trainlike_anchor_manifest(
     """Tao manifest co the dua thang vao gee_trainlike_download.py."""
     anchor_dt = parse_datetime_utc(candidate["anchor_datetime"])
     pair_id = f"anchor_{anchor_dt.strftime('%Y%m%dT%H%M%S')}_pre{int(candidate['window_before_days'])}_post{int(candidate['window_after_days'])}"
+    support = support_pair_later_first(candidate)
     return {
         "manifest_type": "trainlike_anchor",
         "anchor_source": "stac_midpoint_pair",
@@ -1177,12 +2386,24 @@ def build_trainlike_anchor_manifest(
         "selection_priority": "latest_input_datetime",
         "anchor_datetime": candidate["anchor_datetime"],
         "pair_id": pair_id,
-        "t1_id": candidate["support_t1_id"],
-        "t2_id": candidate["support_t2_id"],
-        "t1_datetime": candidate["support_t1_datetime"],
-        "t2_datetime": candidate["support_t2_datetime"],
-        "t1_orbit_state": candidate.get("support_t1_orbit_state"),
-        "t2_orbit_state": candidate.get("support_t2_orbit_state"),
+        "t1_id": support["t1_id"],
+        "t2_id": support["t2_id"],
+        "t1_datetime": support["t1_datetime"],
+        "t2_datetime": support["t2_datetime"],
+        "later_id": support["later_id"],
+        "earlier_id": support["earlier_id"],
+        "later_datetime": support["later_datetime"],
+        "earlier_datetime": support["earlier_datetime"],
+        "support_pair_semantics": {
+            "t1_role": "later/posterior exact support scene",
+            "t2_role": "earlier/prior exact support scene",
+        },
+        "model_input_semantics": {
+            "s1t1_role": "post/future window relative to anchor",
+            "s1t2_role": "pre/past window relative to anchor",
+        },
+        "t1_orbit_state": support.get("t1_orbit_state"),
+        "t2_orbit_state": support.get("t2_orbit_state"),
         "aoi_bbox": aoi_bbox,
         "aoi_geojson": str(Path(geojson_path).resolve()) if geojson_path else None,
         "required_polarizations": required_pols,
@@ -1197,8 +2418,11 @@ def build_trainlike_anchor_manifest(
         "post_scenes": candidate["post_scenes"],
         "support_pair_delta_hours": candidate["support_pair_delta_hours"],
         "support_pair_delta_days": candidate["support_pair_delta_days"],
-        "aoi_bbox_coverage_t1": candidate["aoi_bbox_coverage_t1"],
-        "aoi_bbox_coverage_t2": candidate["aoi_bbox_coverage_t2"],
+        "aoi_coverage_t1": candidate.get("aoi_coverage_t2"),
+        "aoi_coverage_t2": candidate.get("aoi_coverage_t1"),
+        "aoi_bbox_coverage_t1": candidate["aoi_bbox_coverage_t2"],
+        "aoi_bbox_coverage_t2": candidate["aoi_bbox_coverage_t1"],
+        "aoi_union_coverage_pair": candidate.get("aoi_union_coverage_pair", 0.0),
     }
 
 
@@ -1212,16 +2436,18 @@ def print_anchor_table(candidates: List[Dict[str, Any]], top_k: int = 10) -> Non
     print(f"{'#':>3} {'pre':>5} {'post':>5} {'latest_in':<22} {'anchor':<22} {'support_t1':<40} {'support_t2':<40}")
     print("=" * 160)
     for idx, cand in enumerate(candidates[:top_k], 1):
+        support = support_pair_later_first(cand)
         print(
             f"{idx:>3} {cand['pre_scene_count']:>5} {cand['post_scene_count']:>5} "
             f"{cand['post_latest_scene_datetime'][:22]:<22} {cand['anchor_datetime'][:22]:<22} "
-            f"{cand['support_t1_id'][:40]:<40} {cand['support_t2_id'][:40]:<40}"
+            f"{support['t1_id'][:40]:<40} {support['t2_id'][:40]:<40}"
         )
 
 
 def diagnose_no_pair(
     items: List[Dict[str, Any]],
     aoi_bbox: List[float],
+    aoi_geometry: Dict[str, Any],
     strict_slice: bool,
     min_overlap: float,
     min_aoi_coverage: float,
@@ -1245,6 +2471,7 @@ def diagnose_no_pair(
 
     min_delta_sec = max(0.0, float(min_delta_hours) * 3600.0)
     max_delta_sec = max(0.0, float(max_delta_days) * 86400.0)
+    annotate_items_for_aoi(sorted_items, aoi_geometry, aoi_bbox=aoi_bbox)
 
     for i in range(len(sorted_items) - 1):
         info_t1 = extract_item_info(sorted_items[i])
@@ -1280,14 +2507,15 @@ def diagnose_no_pair(
                 continue
 
             overlap = bbox_overlap_ratio(bbox1, bbox2)
-            cover_t1 = coverage_ratio(aoi_bbox, bbox1)
-            cover_t2 = coverage_ratio(aoi_bbox, bbox2)
-            if cover_t1 < min_aoi_coverage or cover_t2 < min_aoi_coverage:
+            cover_t1 = item_aoi_coverage_value(sorted_items[i])
+            cover_t2 = item_aoi_coverage_value(sorted_items[j])
+            if cover_t1 <= min_aoi_coverage or cover_t2 <= min_aoi_coverage:
                 spatial_pairs += 1
 
     relaxed_pairs = search_pairs_sorted(
         items=items,
         aoi_bbox=aoi_bbox,
+        aoi_geometry=aoi_geometry,
         min_overlap=0.0,
         min_aoi_coverage=0.0,
         max_delta_days=90,
@@ -1307,7 +2535,7 @@ def diagnose_no_pair(
     elif total_pairs > 0 and max_time_pairs == total_pairs:
         reason = "NO_PAIR_WITH_MAX_TIME_WINDOW"
     elif total_pairs > 0 and spatial_pairs == total_pairs:
-        reason = "NO_PAIR_WITH_FULL_AOI_COVERAGE"
+        reason = "NO_PAIR_WITH_AOI_GEOMETRY_COVERAGE"
     else:
         reason = "NO_VALID_PAIR"
 
@@ -1404,17 +2632,28 @@ def build_pair_run_config(args: argparse.Namespace, required_pols: List[str]) ->
 
 def build_selected_pair_info(pair: Dict[str, Any], manifest: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Tom tat thong tin cap duoc chon de dua vao summary/report."""
-    min_cov = min(pair["aoi_bbox_coverage_t1"], pair["aoi_bbox_coverage_t2"])
+    canonical = exact_pair_later_first(pair)
+    min_cov = min(canonical["aoi_coverage_t1"], canonical["aoi_coverage_t2"])
+    min_bbox_cov = min(canonical["aoi_bbox_coverage_t1"], canonical["aoi_bbox_coverage_t2"])
     info: Dict[str, Any] = {
-        "t1_id": pair["t1_id"],
-        "t2_id": pair["t2_id"],
-        "t1_datetime": pair["t1_datetime"],
-        "t2_datetime": pair["t2_datetime"],
-        "latest_input_datetime": pair["t2_datetime"],
-        "t1_datatake_id": pair.get("t1_datatake_id"),
-        "t2_datatake_id": pair.get("t2_datatake_id"),
-        "t1_orbit_state": pair.get("t1_orbit_state"),
-        "t2_orbit_state": pair.get("t2_orbit_state"),
+        "t1_id": canonical["t1_id"],
+        "t2_id": canonical["t2_id"],
+        "t1_datetime": canonical["t1_datetime"],
+        "t2_datetime": canonical["t2_datetime"],
+        "later_id": canonical["later_id"],
+        "earlier_id": canonical["earlier_id"],
+        "later_datetime": canonical["later_datetime"],
+        "earlier_datetime": canonical["earlier_datetime"],
+        "pair_semantics": {
+            "t1_role": "later/posterior exact scene",
+            "t2_role": "earlier/prior exact scene",
+            "matches_training_semantics": True,
+        },
+        "latest_input_datetime": canonical["latest_input_datetime"],
+        "t1_datatake_id": canonical.get("t1_datatake_id"),
+        "t2_datatake_id": canonical.get("t2_datatake_id"),
+        "t1_orbit_state": canonical.get("t1_orbit_state"),
+        "t2_orbit_state": canonical.get("t2_orbit_state"),
         "relative_orbit": pair.get("relative_orbit"),
         "slice_number": pair.get("slice_number"),
         "delta_seconds": pair["delta_seconds"],
@@ -1422,12 +2661,15 @@ def build_selected_pair_info(pair: Dict[str, Any], manifest: Optional[Dict[str, 
         "delta_days": pair["delta_days"],
         "delta_human": format_duration_human(pair["delta_seconds"]),
         "bbox_overlap": pair["bbox_overlap"],
-        "aoi_bbox_coverage_t1": pair["aoi_bbox_coverage_t1"],
-        "aoi_bbox_coverage_t2": pair["aoi_bbox_coverage_t2"],
-        "aoi_bbox_coverage_min": min_cov,
-        "aoi_coverage_t1": pair["aoi_coverage_t1"],
-        "aoi_coverage_t2": pair["aoi_coverage_t2"],
+        "aoi_union_coverage_pair": canonical.get("aoi_union_coverage_pair", 0.0),
+        "aoi_bbox_coverage_t1": canonical["aoi_bbox_coverage_t1"],
+        "aoi_bbox_coverage_t2": canonical["aoi_bbox_coverage_t2"],
+        "aoi_bbox_coverage_min": min_bbox_cov,
+        "aoi_coverage_t1": canonical["aoi_coverage_t1"],
+        "aoi_coverage_t2": canonical["aoi_coverage_t2"],
         "aoi_coverage_min": min_cov,
+        "coverage_source_t1": canonical.get("coverage_source_t1", "none"),
+        "coverage_source_t2": canonical.get("coverage_source_t2", "none"),
     }
     if manifest is not None:
         info["pair_id"] = manifest.get("pair_id")
@@ -1510,7 +2752,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     """Liet ke item phu hop AOI + filters."""
     client = STACClient(args.stac_url)
     required_pols = parse_required_pols(args.pols)
-    items, _ = collect_items_with_filters(client, args, required_pols)
+    items, _, _ = collect_items_with_filters(client, args, required_pols)
 
     if not items:
         print("[KET QUA] Khong tim thay item nao.")
@@ -1543,11 +2785,12 @@ def cmd_pair(args: argparse.Namespace) -> None:
     """Tim va in danh sach cap T1/T2 hop le."""
     client = STACClient(args.stac_url)
     required_pols = parse_required_pols(args.pols)
-    items, aoi_bbox = collect_items_with_filters(client, args, required_pols)
+    items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, args, required_pols)
 
     pairs = search_pairs_sorted(
         items=items,
         aoi_bbox=aoi_bbox,
+        aoi_geometry=aoi_geometry,
         min_overlap=args.min_overlap,
         min_aoi_coverage=args.min_aoi_coverage,
         max_delta_days=args.max_delta_days,
@@ -1562,7 +2805,7 @@ def cmd_suggest_anchor(args: argparse.Namespace) -> None:
     """De xuat anchor cho train-like GEE windows khi chi co AOI + STAC."""
     client = STACClient(args.stac_url)
     required_pols = parse_required_pols(args.pols)
-    items, aoi_bbox = collect_items_with_filters(client, args, required_pols)
+    items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, args, required_pols)
     if not items:
         print("[KET QUA] Khong co item hop le sau filter.")
         return
@@ -1570,6 +2813,7 @@ def cmd_suggest_anchor(args: argparse.Namespace) -> None:
     candidates = suggest_trainlike_anchors(
         items=items,
         aoi_bbox=aoi_bbox,
+        aoi_geometry=aoi_geometry,
         window_before_days=args.window_before_days,
         window_after_days=args.window_after_days,
         min_aoi_coverage=args.min_aoi_coverage,
@@ -1611,7 +2855,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
     """
     client = STACClient(args.stac_url)
     required_pols = parse_required_pols(args.pols)
-    items, aoi_bbox = collect_items_with_filters(client, args, required_pols)
+    items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, args, required_pols)
 
     if not items:
         print("[KET QUA] Khong co item hop le sau filter.")
@@ -1620,6 +2864,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
     strict_pairs = search_pairs_sorted(
         items=items,
         aoi_bbox=aoi_bbox,
+        aoi_geometry=aoi_geometry,
         min_overlap=args.min_overlap,
         min_aoi_coverage=args.min_aoi_coverage,
         max_delta_days=args.max_delta_days,
@@ -1635,6 +2880,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
         diag = diagnose_no_pair(
             items=items,
             aoi_bbox=aoi_bbox,
+            aoi_geometry=aoi_geometry,
             strict_slice=args.strict_slice,
             min_overlap=args.min_overlap,
             min_aoi_coverage=args.min_aoi_coverage,
@@ -1672,6 +2918,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
             candidate_pairs = search_pairs_sorted(
                 items=items,
                 aoi_bbox=aoi_bbox,
+                aoi_geometry=aoi_geometry,
                 min_overlap=min_ov,
                 min_aoi_coverage=min_cov,
                 max_delta_days=max_days,
@@ -1793,7 +3040,7 @@ def cmd_download_aoi_matches(args: argparse.Namespace) -> None:
             rel_orbit=args.rel_orbit,
             pols=args.pols,
         )
-        items, _ = collect_items_with_filters(client, qargs, required_pols)
+        items, _, _ = collect_items_with_filters(client, qargs, required_pols)
         _, aoi_geometry = load_geojson_aoi(str(gj))
         items = sorted(items, key=lambda it: parse_datetime_utc(extract_item_info(it)["datetime"]), reverse=True)
         if args.max_items_per_aoi > 0:
@@ -1915,10 +3162,11 @@ def cmd_download_generated_pairs(args: argparse.Namespace) -> None:
             max_delta_days=args.max_delta_days,
             strict_slice=args.strict_slice,
         )
-        items, aoi_bbox = collect_items_with_filters(client, qargs, required_pols)
+        items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, qargs, required_pols)
         strict_pairs = search_pairs_sorted(
             items=items,
             aoi_bbox=aoi_bbox,
+            aoi_geometry=aoi_geometry,
             min_overlap=args.min_overlap,
             min_aoi_coverage=args.min_aoi_coverage,
             max_delta_days=args.max_delta_days,
@@ -1935,6 +3183,7 @@ def cmd_download_generated_pairs(args: argparse.Namespace) -> None:
             diag = diagnose_no_pair(
                 items=items,
                 aoi_bbox=aoi_bbox,
+                aoi_geometry=aoi_geometry,
                 strict_slice=args.strict_slice,
                 min_overlap=args.min_overlap,
                 min_aoi_coverage=args.min_aoi_coverage,
@@ -1945,6 +3194,7 @@ def cmd_download_generated_pairs(args: argparse.Namespace) -> None:
             balanced_pairs = search_pairs_sorted(
                 items=items,
                 aoi_bbox=aoi_bbox,
+                aoi_geometry=aoi_geometry,
                 min_overlap=args.min_overlap,
                 min_aoi_coverage=args.min_aoi_coverage,
                 max_delta_days=30,
@@ -1959,6 +3209,7 @@ def cmd_download_generated_pairs(args: argparse.Namespace) -> None:
                 loose_pairs = search_pairs_sorted(
                     items=items,
                     aoi_bbox=aoi_bbox,
+                    aoi_geometry=aoi_geometry,
                     min_overlap=args.min_overlap,
                     min_aoi_coverage=args.min_aoi_coverage,
                     max_delta_days=90,
@@ -1985,6 +3236,7 @@ def cmd_download_generated_pairs(args: argparse.Namespace) -> None:
                 diag = diagnose_no_pair(
                     items=items,
                     aoi_bbox=aoi_bbox,
+                    aoi_geometry=aoi_geometry,
                     strict_slice=args.strict_slice,
                     min_overlap=args.min_overlap,
                     min_aoi_coverage=args.min_aoi_coverage,
@@ -2094,13 +3346,19 @@ def cmd_download_generated_pairs(args: argparse.Namespace) -> None:
             report_lines.append(f"- Pair found: `True`")
             report_lines.append(f"- Profile: `{rec['selected_profile']}`")
             report_lines.append(f"- Pair ID: `{sp.get('pair_id')}`")
-            report_lines.append(f"- T1 ID: `{sp['t1_id']}`")
-            report_lines.append(f"- T2 ID: `{sp['t2_id']}`")
-            report_lines.append(f"- T1 datetime: `{sp['t1_datetime']}`")
-            report_lines.append(f"- T2 datetime: `{sp['t2_datetime']}`")
+            report_lines.append(f"- T1 ID (later): `{sp['t1_id']}`")
+            report_lines.append(f"- T2 ID (earlier): `{sp['t2_id']}`")
+            report_lines.append(f"- T1 datetime (later): `{sp['t1_datetime']}`")
+            report_lines.append(f"- T2 datetime (earlier): `{sp['t2_datetime']}`")
+            report_lines.append(f"- Later exact scene: `{sp.get('later_id')}` @ `{sp.get('later_datetime')}`")
+            report_lines.append(f"- Earlier exact scene: `{sp.get('earlier_id')}` @ `{sp.get('earlier_datetime')}`")
             report_lines.append(f"- Delta exact: `{sp['delta_human']}`")
             report_lines.append(f"- Delta hours: `{sp['delta_hours']:.6f}`")
             report_lines.append(f"- Delta days: `{sp['delta_days']:.6f}`")
+            report_lines.append(f"- AOI geometry coverage T1: `{sp['aoi_coverage_t1']:.6f}`")
+            report_lines.append(f"- AOI geometry coverage T2: `{sp['aoi_coverage_t2']:.6f}`")
+            report_lines.append(f"- AOI geometry coverage min: `{sp['aoi_coverage_min']:.6f}`")
+            report_lines.append(f"- AOI union coverage pair: `{sp.get('aoi_union_coverage_pair', 0.0):.6f}`")
             report_lines.append(f"- BBox overlap (diagnostic): `{sp['bbox_overlap']:.6f}`")
             report_lines.append(f"- AOI bbox coverage T1: `{sp['aoi_bbox_coverage_t1']:.6f}`")
             report_lines.append(f"- AOI bbox coverage T2: `{sp['aoi_bbox_coverage_t2']:.6f}`")
@@ -2122,7 +3380,7 @@ def cmd_download_generated_pairs(args: argparse.Namespace) -> None:
                 report_lines.append(f"- Orbit direction fail pairs: `{diag.get('orbit_direction_fail_pairs')}`")
                 report_lines.append(f"- Too close pairs: `{diag.get('too_close_pairs')}`")
                 report_lines.append(f"- Too far pairs: `{diag.get('too_far_pairs')}`")
-                report_lines.append(f"- Full AOI coverage fail pairs: `{diag.get('spatial_fail_pairs')}`")
+                report_lines.append(f"- AOI geometry coverage fail pairs: `{diag.get('spatial_fail_pairs')}`")
         report_lines.append("")
 
     report_lines.append(f"- Summary JSON: `{summary_path}`")
@@ -2203,7 +3461,7 @@ def main() -> None:
 
     def add_pair_rules(p: argparse.ArgumentParser) -> None:
         p.add_argument("--min-overlap", type=float, default=0.0, help="Tham so legacy cho bbox overlap; hien chi dung de report/ranking")
-        p.add_argument("--min-aoi-coverage", type=float, default=1.0, help="AOI bbox coverage toi thieu cho moi anh (0-1)")
+        p.add_argument("--min-aoi-coverage", type=float, default=0.0, help="AOI geometry coverage toi thieu cho moi anh; hard gate la coverage > nguong")
         p.add_argument("--min-delta-hours", type=float, default=24.0, help="Delta t toi thieu (gio)")
         p.add_argument("--max-delta-days", type=int, default=10, help="Delta t toi da (ngay)")
         p.add_argument("--same-orbit-direction", action="store_true", help="Chi chap nhan cap co cung orbit_state (ascending/descending)")

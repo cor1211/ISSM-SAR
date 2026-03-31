@@ -1,5 +1,5 @@
 workflow:
-  mode: stac_trainlike_composite
+  mode: gee_trainlike_composite
 
 stac:
   url: http://10.0.1.79:8081
@@ -7,9 +7,21 @@ stac:
   datetime: null
   limit: 300
 
+gee:
+  project: downloads1correspondings2sgdm
+  collection: COPERNICUS/S1_GRD
+  datetime: null
+  authenticate: false
+  band_names:
+    - VV
+    - VH
+  output_band_descriptions:
+    - S1_VV
+    - S1_VH
+
 compatibility:
   trained_input_profile: gee_s1_db
-  current_download_profile: stac_trainlike_composite_db
+  current_download_profile: gee_s1_db
   allow_domain_mismatch: false
 
 pairing:
@@ -17,7 +29,7 @@ pairing:
   orbit: null
   rel_orbit: null
   min_overlap: 0.0
-  min_aoi_coverage: 1.0
+  min_aoi_coverage: 0.0
   min_delta_hours: 24.0
   max_delta_days: 10
   same_orbit_direction: false
@@ -25,6 +37,21 @@ pairing:
   auto_relax: false
 
 trainlike:
+  selection_strategy: representative_calendar_period
+  period_mode: month
+  period_boundary_policy: clip_inside_period
+  period_split_policy: first_half_vs_second_half
+  auto_datetime_strategy: previous_full_month
+  auto_datetime_months_back: 1
+  auto_datetime_timezone: Asia/Ho_Chi_Minh
+  allow_partial_periods: false
+  min_scenes_per_half: 2
+  auto_relax_inside_period: true
+  representative_pool_mode: auto
+  componentize_seed_intersections: false
+  component_parent_mosaic: true
+  component_item_min_coverage: 0.99
+  component_min_area_ratio: 0.0
   window_before_days: 30
   window_after_days: 30
   min_scenes_per_window: 1
@@ -32,6 +59,8 @@ trainlike:
   anchor_pick_index: 1
   same_orbit_direction: false
   anchor_min_delta_hours: 24.0
+  orbit_pass: BOTH
+  clip_mode: geometry
   target_crs: EPSG:3857
   target_resolution: 10.0
   resampling: bilinear
@@ -58,3 +87,12 @@ inference:
 output:
   root_dir: runs/pipeline
   output_dir_name: output
+  save_debug_artifacts: false
+  final_target_crs: EPSG:4326
+  final_target_resolution: null
+  final_resampling: bilinear
+
+logging:
+  level: INFO
+  redact_secrets: true
+  startup_env_checks: true

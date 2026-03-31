@@ -34,6 +34,15 @@ input:
   input_dir: "data/input"            # Directory containing multiple logical pairs
   t1_prefix: "s1t1_"                # Prefix identifying T1 images
   t2_prefix: "s1t2_"                # Prefix identifying T2 images
+  # Canonical model convention:
+  #   S1T1 = post / future / later model input
+  #   S1T2 = pre  / past   / earlier model input
+  # Exact-pair benchmarking may override these at runtime.
+  t1_label: "S1T1"
+  t2_label: "S1T2"
+  t1_role: "post/future window or later model input"
+  t2_role: "pre/past window or earlier model input"
+  matches_training_semantics: true
   cache_aligned_inputs: false       # If true, persist aligned 2-band t1_input/t2_input when reading 4x1-band layout
   cache_dir: null                   # Optional directory for aligned input cache
 

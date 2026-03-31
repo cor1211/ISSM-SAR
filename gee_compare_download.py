@@ -9,6 +9,7 @@ GeoTIFFs compatible with infer_production.py.
 from __future__ import annotations
 
 import argparse
+import copy
 from collections import defaultdict
 import importlib.metadata as importlib_metadata_std
 import json
@@ -24,10 +25,16 @@ import rasterio
 from affine import Affine
 from pyproj import Transformer
 from rasterio.crs import CRS
-from shapely.geometry import box, shape
+from shapely.geometry import shape
 import yaml
 
-from query_stac_download import DEFAULT_STAC_API, build_manifest_for_pair
+from query_stac_download import (
+    DEFAULT_STAC_API,
+    build_manifest_for_pair,
+    canonical_bbox_from_geometry,
+    compute_item_aoi_geometry_metrics,
+    load_geojson_aoi,
+)
 from sar_pipeline import load_yaml as load_pipeline_yaml, select_best_pair
 
 
@@ -158,6 +165,63 @@ def parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+def normalize_manifest_model_order(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize public T1/T2 fields into canonical model order:
+      - T1 = later/posterior
+      - T2 = earlier/prior
+
+    Older manifests may still store public T1/T2 as earlier/later.
+    """
+    if "t1_datetime" not in manifest or "t2_datetime" not in manifest:
+        return manifest
+
+    out = copy.deepcopy(manifest)
+    t1_dt = parse_utc(out["t1_datetime"])
+    t2_dt = parse_utc(out["t2_datetime"])
+
+    if t1_dt >= t2_dt:
+        out.setdefault("later_id", out.get("t1_id"))
+        out.setdefault("earlier_id", out.get("t2_id"))
+        out.setdefault("later_datetime", out.get("t1_datetime"))
+        out.setdefault("earlier_datetime", out.get("t2_datetime"))
+        return out
+
+    out["later_id"] = out.get("t2_id")
+    out["earlier_id"] = out.get("t1_id")
+    out["later_datetime"] = out.get("t2_datetime")
+    out["earlier_datetime"] = out.get("t1_datetime")
+
+    for left, right in [
+        ("t1_id", "t2_id"),
+        ("t1_datetime", "t2_datetime"),
+        ("t1_datatake_id", "t2_datatake_id"),
+        ("t1_orbit_state", "t2_orbit_state"),
+        ("aoi_bbox_coverage_t1", "aoi_bbox_coverage_t2"),
+        ("aoi_coverage_t1", "aoi_coverage_t2"),
+    ]:
+        if left in out or right in out:
+            out[left], out[right] = out.get(right), out.get(left)
+
+    assets = out.get("assets")
+    if isinstance(assets, dict):
+        for pol, entry in assets.items():
+            if not isinstance(entry, dict):
+                continue
+            for left, right in [("t1_asset_key", "t2_asset_key"), ("t1_href", "t2_href")]:
+                if left in entry or right in entry:
+                    entry[left], entry[right] = entry.get(right), entry.get(left)
+            assets[pol] = entry
+
+    semantics = out.get("pair_semantics")
+    if isinstance(semantics, dict):
+        semantics["t1_role"] = "later/posterior exact scene"
+        semantics["t2_role"] = "earlier/prior exact scene"
+        semantics["matches_training_semantics"] = True
+        out["pair_semantics"] = semantics
+    return out
+
+
 def normalize_orbit_state(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -206,6 +270,7 @@ def load_system_manifest(
     aoi_geojson = str(Path(geojson_path).resolve())
     if manifest_path:
         manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        manifest = normalize_manifest_model_order(manifest)
         manifest.setdefault("aoi_geojson", aoi_geojson)
         if "aoi_bbox" not in manifest:
             raise ValueError("Manifest must contain aoi_bbox.")
@@ -214,10 +279,11 @@ def load_system_manifest(
     from query_stac_download import STACClient
 
     client = STACClient(pipeline_config.get("stac", {}).get("url", DEFAULT_STAC_API))
-    _, aoi_bbox, pair, selection_profile, diagnostics = select_best_pair(client, pipeline_config, aoi_geojson)
+    _, aoi_bbox, _, pair, selection_profile, diagnostics = select_best_pair(client, pipeline_config, aoi_geojson)
     manifest = build_manifest_for_pair(pair, ["VV", "VH"])
     if manifest is None:
         raise RuntimeError("Failed to build system manifest for selected pair.")
+    manifest = normalize_manifest_model_order(manifest)
     manifest["selection_profile"] = selection_profile
     manifest["aoi_geojson"] = aoi_geojson
     manifest["aoi_bbox"] = aoi_bbox
@@ -257,7 +323,8 @@ def image_to_candidate(
     target_dt: datetime,
     target_system_id: str,
     target_orbit_pass: Optional[str],
-    aoi_bbox_polygon,
+    aoi_geometry_geojson: Optional[Dict[str, Any]],
+    aoi_bbox: List[float],
 ) -> GEECandidate:
     full_id = image.id().getInfo()
     system_index = full_id.split("/")[-1] if full_id else str(image.get("system:index").getInfo())
@@ -265,14 +332,27 @@ def image_to_candidate(
     dt_utc = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
     orbit_pass = image.get("orbitProperties_pass").getInfo()
     geom_info = image.geometry().getInfo()
-    footprint = shape(geom_info)
-    coverage_ratio = footprint.intersection(aoi_bbox_polygon).area / aoi_bbox_polygon.area
+    coverage_metrics = compute_item_aoi_geometry_metrics(
+        {
+            "geometry": geom_info,
+            "bbox": canonical_bbox_from_geometry(geom_info),
+            "properties": {},
+        },
+        aoi_geometry_geojson or {"type": "Polygon", "coordinates": [[
+            [aoi_bbox[0], aoi_bbox[1]],
+            [aoi_bbox[2], aoi_bbox[1]],
+            [aoi_bbox[2], aoi_bbox[3]],
+            [aoi_bbox[0], aoi_bbox[3]],
+            [aoi_bbox[0], aoi_bbox[1]],
+        ]]},
+        aoi_bbox=aoi_bbox,
+    )
     return GEECandidate(
         full_id=full_id,
         system_index=system_index,
         datetime_utc=dt_utc,
         orbit_pass=orbit_pass,
-        coverage_ratio=coverage_ratio,
+        coverage_ratio=float(coverage_metrics["aoi_coverage"]),
         exact_id_match=_gee_id_matches_target(system_index, target_system_id),
         orbit_match=(target_orbit_pass is not None and orbit_pass == target_orbit_pass),
         delta_to_target_seconds=abs((dt_utc - target_dt).total_seconds()),
@@ -283,15 +363,16 @@ def image_to_candidate(
 def select_gee_candidate(
     config: Dict[str, Any],
     aoi_bbox: List[float],
+    aoi_geometry_geojson: Optional[Dict[str, Any]],
     target_dt_str: str,
     target_system_id: str,
     target_orbit_state: Optional[str],
 ) -> Tuple[Optional[GEECandidate], Dict[str, Any]]:
     gee_cfg = config["gee"]
     window_minutes = int(gee_cfg.get("match_window_minutes", 30))
+    min_aoi_coverage = float(gee_cfg.get("min_aoi_coverage", 0.0))
     target_dt = parse_utc(target_dt_str)
     aoi_geom = ee.Geometry.Rectangle(aoi_bbox, proj="EPSG:4326", geodesic=False)
-    aoi_bbox_polygon = box(*aoi_bbox)
 
     base_coll = collection_base(config, aoi_geom, target_dt, window_minutes)
     base_count = int(base_coll.size().getInfo())
@@ -329,7 +410,8 @@ def select_gee_candidate(
             target_dt=target_dt,
             target_system_id=target_system_id,
             target_orbit_pass=target_orbit_pass,
-            aoi_bbox_polygon=aoi_bbox_polygon,
+            aoi_geometry_geojson=aoi_geometry_geojson,
+            aoi_bbox=aoi_bbox,
         )
         all_candidates.append(
             {
@@ -343,16 +425,17 @@ def select_gee_candidate(
                 "delta_to_target_seconds": candidate.delta_to_target_seconds,
             }
         )
-        if shape(candidate.geometry_geojson).covers(aoi_bbox_polygon):
+        if candidate.coverage_ratio > min_aoi_coverage:
             covered_candidates.append(candidate)
 
     if not covered_candidates:
         return None, {
-            "reason": "AOI_NOT_FULLY_COVERED",
+            "reason": "AOI_GEOMETRY_COVERAGE_BELOW_THRESHOLD",
             "window_minutes": window_minutes,
             "raw_candidate_count": base_count,
             "polarized_candidate_count": pol_count,
             "covered_candidate_count": 0,
+            "min_aoi_coverage": min_aoi_coverage,
             "candidates": all_candidates,
         }
 
@@ -368,6 +451,7 @@ def select_gee_candidate(
     return chosen, {
         "reason": "OK",
         "window_minutes": window_minutes,
+        "min_aoi_coverage": min_aoi_coverage,
         "raw_candidate_count": base_count,
         "polarized_candidate_count": pol_count,
         "covered_candidate_count": len(covered_candidates),
@@ -380,13 +464,19 @@ def build_export_params(
     grid: Dict[str, Any],
     band_names: List[str],
 ) -> Dict[str, Any]:
+    crs_transform = grid.get("crs_transform")
+    if crs_transform is None:
+        transform = grid.get("transform")
+        if transform is None:
+            raise KeyError("crs_transform")
+        crs_transform = list(transform)[:6]
     return {
         "name": export_name,
         "format": "GEO_TIFF",
         "filePerBand": False,
         "bands": band_names,
         "crs": grid["crs"],
-        "crs_transform": grid["crs_transform"],
+        "crs_transform": crs_transform,
         "dimensions": [grid["width"], grid["height"]],
     }
 
@@ -486,21 +576,24 @@ def write_report(run_dir: Path, report: Dict[str, Any]) -> Tuple[Path, Path]:
         f"- AOI: `{report_jsonable['aoi_geojson']}`",
         f"- System manifest: `{report_jsonable['system_reference_manifest']}`",
         f"- Pair ID: `{system_pair['pair_id']}`",
-        f"- T1 ID: `{system_pair['t1_id']}`",
-        f"- T2 ID: `{system_pair['t2_id']}`",
-        f"- T1 datetime: `{system_pair['t1_datetime']}`",
-        f"- T2 datetime: `{system_pair['t2_datetime']}`",
+        f"- T1 ID (later): `{system_pair['t1_id']}`",
+        f"- T2 ID (earlier): `{system_pair['t2_id']}`",
+        f"- T1 datetime (later): `{system_pair['t1_datetime']}`",
+        f"- T2 datetime (earlier): `{system_pair['t2_datetime']}`",
+        f"- Chronology provenance: earlier=`{system_pair.get('earlier_id')}` @ `{system_pair.get('earlier_datetime')}` -> later=`{system_pair.get('later_id')}` @ `{system_pair.get('later_datetime')}`",
         f"- Delta: `{system_pair['delta_human']}`",
         f"- AOI bbox: `{system_pair['aoi_bbox']}`",
+        f"- AOI geometry coverage T1: `{system_pair.get('aoi_coverage_t1')}`",
+        f"- AOI geometry coverage T2: `{system_pair.get('aoi_coverage_t2')}`",
         f"- AOI bbox coverage T1: `{system_pair.get('aoi_bbox_coverage_t1')}`",
         f"- AOI bbox coverage T2: `{system_pair.get('aoi_bbox_coverage_t2')}`",
         "",
         "## GEE Match",
         "",
-        f"- T1 GEE ID: `{gee_pair.get('t1', {}).get('gee_id')}`",
-        f"- T2 GEE ID: `{gee_pair.get('t2', {}).get('gee_id')}`",
-        f"- T1 GEE datetime: `{gee_pair.get('t1', {}).get('gee_datetime')}`",
-        f"- T2 GEE datetime: `{gee_pair.get('t2', {}).get('gee_datetime')}`",
+        f"- T1 GEE ID (later): `{gee_pair.get('t1', {}).get('gee_id')}`",
+        f"- T2 GEE ID (earlier): `{gee_pair.get('t2', {}).get('gee_id')}`",
+        f"- T1 GEE datetime (later): `{gee_pair.get('t1', {}).get('gee_datetime')}`",
+        f"- T2 GEE datetime (earlier): `{gee_pair.get('t2', {}).get('gee_datetime')}`",
         f"- T1 orbit pass: `{gee_pair.get('t1', {}).get('orbit_pass')}`",
         f"- T2 orbit pass: `{gee_pair.get('t2', {}).get('orbit_pass')}`",
         f"- T1 exact id match: `{gee_pair.get('t1', {}).get('exact_id_match')}`",
@@ -581,6 +674,7 @@ def main() -> None:
     output_descs = list(gee_cfg.get("output_band_descriptions", ["S1_VV", "S1_VH"]))
     band_names = list(gee_cfg.get("band_names", ["VV", "VH"]))
     grid = build_target_grid(system_manifest["aoi_bbox"], target_crs, target_scale, target_scale)
+    _, aoi_geometry = load_geojson_aoi(args.geojson)
 
     run_root = ensure_dir(args.out_dir or gee_config.get("output", {}).get("root_dir", "runs/gee_compare"))
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -591,6 +685,7 @@ def main() -> None:
     t1_candidate, t1_diag = select_gee_candidate(
         gee_config,
         aoi_bbox=system_manifest["aoi_bbox"],
+        aoi_geometry_geojson=aoi_geometry,
         target_dt_str=system_manifest["t1_datetime"],
         target_system_id=system_manifest["t1_id"],
         target_orbit_state=system_manifest.get("t1_orbit_state"),
@@ -601,6 +696,7 @@ def main() -> None:
     t2_candidate, t2_diag = select_gee_candidate(
         gee_config,
         aoi_bbox=system_manifest["aoi_bbox"],
+        aoi_geometry_geojson=aoi_geometry,
         target_dt_str=system_manifest["t2_datetime"],
         target_system_id=system_manifest["t2_id"],
         target_orbit_state=system_manifest.get("t2_orbit_state"),
@@ -646,6 +742,8 @@ def main() -> None:
             "delta_days": system_manifest["delta_days"],
             "delta_human": f"{system_manifest['delta_days']:.6f} days / {system_manifest['delta_hours']:.6f} hours",
             "aoi_bbox": system_manifest["aoi_bbox"],
+            "aoi_coverage_t1": system_manifest.get("aoi_coverage_t1"),
+            "aoi_coverage_t2": system_manifest.get("aoi_coverage_t2"),
             "aoi_bbox_coverage_t1": system_manifest.get("aoi_bbox_coverage_t1"),
             "aoi_bbox_coverage_t2": system_manifest.get("aoi_bbox_coverage_t2"),
         },

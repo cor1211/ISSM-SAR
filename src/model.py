@@ -13,7 +13,7 @@ import argparse
 # from torchviz import make_dot
 # from torch.utils.tensorboard import SummaryWriter
 # import os
-from torchview import draw_graph
+# from torchview import draw_graph
 
 def load_config(config_path: str):
     with open(config_path, 'r') as file:
@@ -362,14 +362,22 @@ class ISSM_SAR(nn.Module):
             self.rec_up.append(REC(in_c=rec_cfg['in_c'], out_c=rec_cfg['out_c'], use_bn=self.use_bn, use_gn=self.use_gn))
             self.rec_down.append(REC(in_c=rec_cfg['in_c'], out_c=rec_cfg['out_c'], use_bn=self.use_bn, use_gn=self.use_gn))
     
-    def forward(self, in_first_time, in_second_time):
+    def forward(self, s1t1_post, s1t2_pre):
+        """Forward using the canonical temporal convention learned in training.
+
+        Args:
+            s1t1_post: post/future low-resolution SAR input (S1T1).
+            s1t2_pre: pre/past low-resolution SAR input (S1T2).
+        """
         # Upsample 2 inputs
-        in_ft_upsampled = F.interpolate(in_first_time,scale_factor=2, mode='bilinear', align_corners=False)
-        in_se_upsampled = F.interpolate(in_second_time,scale_factor=2, mode='bilinear', align_corners=False)
+        in_ft_upsampled = F.interpolate(s1t1_post,scale_factor=2, mode='bilinear', align_corners=False)
+        in_se_upsampled = F.interpolate(s1t2_pre,scale_factor=2, mode='bilinear', align_corners=False)
 
         # Pass throught PFE
-        f1 = self.pfe_up(in_first_time)
-        f2 = self.pfe_down(in_second_time)
+        # The "up" branch always corresponds to S1T1 / post / future.
+        # The "down" branch always corresponds to S1T2 / pre / past.
+        f1 = self.pfe_up(s1t1_post)
+        f2 = self.pfe_down(s1t2_pre)
 
         # Pass throught HFE
         h1 = self.hfe_up(f1)
@@ -435,5 +443,5 @@ if __name__ == '__main__':
     summary(issm_sar, input_size=[(1,1, 128,128),(1,1,128,128)])
 
 
-    model_graph = draw_graph(issm_sar, input_size=[(1, 1, 128, 128), (1, 1, 128, 128)], expand_nested=True)
-    model_graph.visual_graph.render(format='svg')
+    # model_graph = draw_graph(issm_sar, input_size=[(1, 1, 128, 128), (1, 1, 128, 128)], expand_nested=True)
+    # model_graph.visual_graph.render(format='svg')

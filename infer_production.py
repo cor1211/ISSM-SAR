@@ -9,6 +9,7 @@ Features:
   • Reads 2-band (VV, VH) GeoTIFF via rasterio, preserves CRS & transform
   • SAR dB normalisation: clip → [0,1] → [-1,1]
   • Independent VV / VH model instances with separate checkpoints
+  • Logs temporal semantics of the current pair (`T1/T2` vs `S1T1/S1T2`)
   • Sliding-window inference with configurable overlap
   • 2D Gaussian blending to eliminate grid artefacts
   • Batch-wise GPU inference with optional AMP (FP16)
@@ -65,6 +66,18 @@ def load_yaml(path: str | Path) -> Dict[str, Any]:
         raise FileNotFoundError(f"Config file not found: {path}")
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def default_input_semantics() -> Dict[str, Any]:
+    """Canonical semantic convention expected by the trained model."""
+    return {
+        "t1_label": "S1T1",
+        "t2_label": "S1T2",
+        "t1_role": "post/future window or later model input",
+        "t2_role": "pre/past window or earlier model input",
+        "matches_training_semantics": True,
+        "note": "Current checkpoints were trained with model(S1T1_post_future, S1T2_pre_past).",
+    }
 
 
 # ==============================================================
@@ -811,6 +824,43 @@ class SARInferencer:
         blend_suffix = "" if self.gaussian_blend else "_no_blend"
         return save_dir / f"{identifier}_SR_x2{blend_suffix}.tif"
 
+    def _resolve_input_semantics(self, runtime_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Resolve semantic labels for the current pair without changing behaviour."""
+        cfg_input = self.config.get("input", {})
+        semantics = default_input_semantics()
+        merged = dict(semantics)
+        for source in (cfg_input, runtime_cfg or {}):
+            if not isinstance(source, dict):
+                continue
+            for key in ("t1_label", "t2_label", "t1_role", "t2_role", "note"):
+                value = source.get(key)
+                if value not in (None, ""):
+                    merged[key] = value
+            if "matches_training_semantics" in source:
+                merged["matches_training_semantics"] = bool(source["matches_training_semantics"])
+        return merged
+
+    def _log_input_semantics(self, identifier: str, semantics: Dict[str, Any]) -> None:
+        """Emit a clear, one-place log of temporal semantics for the current inference pair."""
+        logger.info(
+            "  Input semantics | Pair=%s | %s=%s | %s=%s | matches_training=%s",
+            identifier,
+            semantics.get("t1_label", "T1"),
+            semantics.get("t1_role"),
+            semantics.get("t2_label", "T2"),
+            semantics.get("t2_role"),
+            semantics.get("matches_training_semantics"),
+        )
+        note = semantics.get("note")
+        if note:
+            logger.info("  Semantics note: %s", note)
+        if not bool(semantics.get("matches_training_semantics", True)):
+            logger.warning(
+                "  Pair '%s' does not follow the canonical training semantics. "
+                "This is acceptable for exact-pair benchmarking/debugging, but not the preferred production input convention.",
+                identifier,
+            )
+
     def _write_optional_staged_inputs(
         self,
         cache_dir: Optional[str | Path],
@@ -1085,8 +1135,16 @@ class SARInferencer:
         t1_path: str | Path,
         t2_path: str | Path,
         out_path: Optional[str | Path] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> Path:
-        """Run inference for one legacy pair of 2-band GeoTIFFs."""
+        """Run inference for one logical 2-band pair.
+
+        `config` is runtime-only and may include semantic labels such as:
+          - t1_label / t2_label
+          - t1_role / t2_role
+          - matches_training_semantics
+        """
+        self._log_input_semantics(identifier, self._resolve_input_semantics(config))
         data_t1, meta_t1 = self._read_geotiff(t1_path)
         data_t2, meta_t2 = self._read_geotiff(t2_path)
         return self._infer_pair_arrays(identifier, data_t1, meta_t1, data_t2, meta_t2, out_path or None)
@@ -1105,6 +1163,7 @@ class SARInferencer:
         """Align 4 single-band GeoTIFFs, optionally cache 2-band inputs, and infer one SR output."""
         pair_id = identifier or Path(out_path).stem.replace("_SR_x2", "")
         runtime_cfg = config or {}
+        self._log_input_semantics(pair_id, self._resolve_input_semantics(runtime_cfg))
         resampling_name = runtime_cfg.get("resampling", "bilinear")
         resampling = self._resolve_resampling(resampling_name)
 

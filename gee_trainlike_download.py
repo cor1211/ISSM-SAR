@@ -27,7 +27,7 @@ from gee_compare_download import (
     to_jsonable,
     validate_pair,
 )
-from query_stac_download import load_geojson_aoi
+from query_stac_download import canonical_bbox_from_geometry, load_geojson_aoi
 
 try:
     import ee
@@ -141,6 +141,52 @@ def collection_summary(collection: ee.ImageCollection, max_items: int = 20) -> D
     }
 
 
+def collection_scene_items(
+    collection: ee.ImageCollection,
+    aoi_bbox: List[float],
+    max_items: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Convert a GEE collection into STAC-like scene items for shared selection logic."""
+    count = int(collection.size().getInfo())
+    if count == 0:
+        return []
+
+    limit = count if max_items is None else min(count, int(max_items))
+    sorted_coll = collection.sort("system:time_start")
+    items = sorted_coll.toList(limit)
+    scenes: List[Dict[str, Any]] = []
+
+    for idx in range(limit):
+        image = ee.Image(items.get(idx))
+        ts_millis = image.date().millis().getInfo()
+        dt = datetime.fromtimestamp(ts_millis / 1000.0, tz=timezone.utc)
+        system_index = str(image.get("system:index").getInfo())
+        orbit_pass = image.get("orbitProperties_pass").getInfo()
+        relative_orbit = image.get("relativeOrbitNumber_start").getInfo()
+        slice_number = image.get("sliceNumber").getInfo()
+        platform = system_index.split("_", 1)[0] if system_index else ""
+        geom_info = image.geometry().getInfo()
+        bbox = canonical_bbox_from_geometry(geom_info)
+        scenes.append(
+            {
+                "id": system_index,
+                "bbox": bbox,
+                "geometry": geom_info,
+                "properties": {
+                    "datetime": to_rfc3339(dt),
+                    "platform": platform,
+                    "sat:orbit_state": str(orbit_pass or "").lower(),
+                    "sat:relative_orbit": relative_orbit,
+                    "s1:slice_number": slice_number,
+                    "sar:polarizations": ["VV", "VH"],
+                    "sar:instrument_mode": "IW",
+                    "sar:product_type": "GRD",
+                },
+            }
+        )
+    return scenes
+
+
 def build_trainlike_image(
     collection: ee.ImageCollection,
     clip_geom: ee.Geometry,
@@ -157,13 +203,19 @@ def build_export_params(
     grid: Dict[str, Any],
     band_names: List[str],
 ) -> Dict[str, Any]:
+    crs_transform = grid.get("crs_transform")
+    if crs_transform is None:
+        transform = grid.get("transform")
+        if transform is None:
+            raise KeyError("crs_transform")
+        crs_transform = list(transform)[:6]
     return {
         "name": export_name,
         "format": "GEO_TIFF",
         "filePerBand": False,
         "bands": band_names,
         "crs": grid["crs"],
-        "crs_transform": grid["crs_transform"],
+        "crs_transform": crs_transform,
         "dimensions": [grid["width"], grid["height"]],
     }
 
@@ -193,7 +245,20 @@ def run_inference(run_dir: Path, pair_id: str, infer_config_path: str | Path) ->
     inferencer = SARInferencer(cfg)
     t1_path = run_dir / f"s1t1_{pair_id}.tif"
     t2_path = run_dir / f"s1t2_{pair_id}.tif"
-    return inferencer.run_pair_from_multiband_files(pair_id, t1_path, t2_path, out_path=out_dir / f"{pair_id}_SR_x2.tif")
+    return inferencer.run_pair_from_multiband_files(
+        pair_id,
+        t1_path,
+        t2_path,
+        out_path=out_dir / f"{pair_id}_SR_x2.tif",
+        config={
+            "t1_label": "S1T1",
+            "t2_label": "S1T2",
+            "t1_role": "post/future window relative to anchor",
+            "t2_role": "pre/past window relative to anchor",
+            "matches_training_semantics": True,
+            "note": "GEE train-like path follows the same temporal convention as the training dataset.",
+        },
+    )
 
 
 def write_report(run_dir: Path, report: Dict[str, Any]) -> Tuple[Path, Path]:
@@ -212,16 +277,17 @@ def write_report(run_dir: Path, report: Dict[str, Any]) -> Tuple[Path, Path]:
         "",
         f"- AOI: `{report_jsonable['aoi_geojson']}`",
         f"- Pair ID: `{sys_ref['pair_id']}`",
-        f"- T1 exact datetime: `{sys_ref['t1_datetime']}`",
-        f"- T2 exact datetime: `{sys_ref['t2_datetime']}`",
+        f"- T1 datetime (later): `{sys_ref['t1_datetime']}`",
+        f"- T2 datetime (earlier): `{sys_ref['t2_datetime']}`",
+        f"- Chronology provenance: earlier=`{sys_ref.get('earlier_id')}` @ `{sys_ref.get('earlier_datetime')}` -> later=`{sys_ref.get('later_id')}` @ `{sys_ref.get('later_datetime')}`",
         f"- AOI bbox: `{sys_ref['aoi_bbox']}`",
         "",
         "## Train-Like Windows",
         "",
         f"- Anchor strategy: `{train_cfg['anchor_strategy']}`",
         f"- Anchor datetime: `{train_cfg['anchor_datetime']}`",
-        f"- T1 window: `{train_cfg['t1_window']['start']}` -> `{train_cfg['t1_window']['end']}`",
-        f"- T2 window: `{train_cfg['t2_window']['start']}` -> `{train_cfg['t2_window']['end']}`",
+        f"- S1T1 window (post/future): `{train_cfg['t1_window']['start']}` -> `{train_cfg['t1_window']['end']}`",
+        f"- S1T2 window (pre/past): `{train_cfg['t2_window']['start']}` -> `{train_cfg['t2_window']['end']}`",
         f"- Orbit pass mode: `{train_cfg['orbit_pass']}`",
         f"- Reducer: `{train_cfg['reducer']}`",
         f"- Focal median radius (m): `{train_cfg['focal_median_radius_m']}`",
@@ -234,8 +300,8 @@ def write_report(run_dir: Path, report: Dict[str, Any]) -> Tuple[Path, Path]:
         "",
         "## Outputs",
         "",
-        f"- T1 file: `{report_jsonable['output_files']['t1']}`",
-        f"- T2 file: `{report_jsonable['output_files']['t2']}`",
+        f"- S1T1 file: `{report_jsonable['output_files']['t1']}`",
+        f"- S1T2 file: `{report_jsonable['output_files']['t2']}`",
         f"- Validation same grid: `{report_jsonable['validation']['same_grid']}`",
         f"- Validation infer scan OK: `{report_jsonable['validation']['pair_scan_ok']}`",
     ]
