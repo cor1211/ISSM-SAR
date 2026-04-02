@@ -9,17 +9,38 @@ __pycache__/
 .env
 .env.*
 
+# Large runtime and experiment artifacts
 data/
+downloads/
 infer-results/
 runs/
 weights/
+checkpoints/
 geojson/
+visualizations/
+visualize/
+
+# Training / evaluation data
+dataset/
+dataset (1)/
+test_results/
+test_results_2/
+valid_results*/
+evaluation_outputs*/
+
+# Docs that are not needed inside the runtime image
 docs/analysis/
 
+# Large binary assets
 *.tif
 *.tiff
 *.ckpt
 *.qgz
 *.aux.xml
+*.npy
+*.npz
+*.pt
+*.pth
 
+# Misc generated outputs
 evaluation_results*.csv

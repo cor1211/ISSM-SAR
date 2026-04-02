@@ -10,9 +10,16 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 
-DEFAULT_LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(message)s"
+DEFAULT_LOG_FORMAT = "%(asctime)s | %(level_badge)-10s | %(name)-18s | %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_LOG_LEVEL = "INFO"
+LEVEL_ICONS = {
+    "DEBUG": "·",
+    "INFO": "ℹ",
+    "WARNING": "⚠",
+    "ERROR": "✖",
+    "CRITICAL": "✖",
+}
 _SECRET_MARKERS = (
     "secret",
     "password",
@@ -55,15 +62,36 @@ def resolve_runtime_log_level(
     return DEFAULT_LOG_LEVEL, "default"
 
 
-def configure_root_logging(level_name: str) -> str:
+def level_icon(level_name: str) -> str:
+    return LEVEL_ICONS.get(normalize_log_level_name(level_name), "·")
+
+
+def level_badge(level_name: str) -> str:
     normalized = normalize_log_level_name(level_name)
-    logging.basicConfig(
-        level=getattr(logging, normalized, logging.INFO),
-        format=DEFAULT_LOG_FORMAT,
-        datefmt=DEFAULT_DATE_FORMAT,
-        force=True,
-    )
+    return f"{normalized:<7} {level_icon(normalized)}"
+
+
+class RuntimeLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        record.level_badge = level_badge(record.levelname)
+        return super().format(record)
+
+
+def configure_root_logging(level_name: str, *, force: bool = True) -> str:
+    normalized = normalize_log_level_name(level_name)
+    logging.basicConfig(level=getattr(logging, normalized, logging.INFO), force=force)
+    formatter = RuntimeLogFormatter(DEFAULT_LOG_FORMAT, datefmt=DEFAULT_DATE_FORMAT)
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        handler.setFormatter(formatter)
     return normalized
+
+
+def ensure_root_logging(level_name: str = DEFAULT_LOG_LEVEL) -> str:
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        return normalize_log_level_name(level_name)
+    return configure_root_logging(level_name, force=False)
 
 
 def is_sensitive_key(key: Optional[str]) -> bool:
@@ -93,7 +121,7 @@ def _stringify_value(value: Any) -> str:
         if math.isinf(value):
             return "inf" if value > 0 else "-inf"
     if isinstance(value, (dict, list, tuple, set)):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return str(value)
 
 
@@ -133,7 +161,10 @@ def format_log_message(
     ]
     if not parts:
         return base
-    return f"{base} | {' '.join(parts)}"
+    if len(parts) == 1:
+        return f"{base} | {parts[0]}"
+    detail_block = "\n".join(f"    {part}" for part in parts)
+    return f"{base}\n{detail_block}"
 
 
 def emit_runtime_log(
@@ -158,7 +189,7 @@ def emit_runtime_log(
 
     timestamp = datetime.now().strftime(DEFAULT_DATE_FORMAT)
     level_name = logging.getLevelName(level)
-    print(f"{timestamp} | {level_name:<7} | {rendered}", file=sys.stderr)
+    print(f"{timestamp} | {level_badge(level_name):<10} | {logger_name:<18} | {rendered}", file=sys.stderr)
 
 
 def detect_s3_credential_source(env: Optional[Mapping[str, str]] = None) -> str:

@@ -50,7 +50,7 @@ except ImportError:
 load_dotenv()
 
 
-DEFAULT_STAC_API = os.getenv("STAC_API_URL", "http://localhost:8080")
+DEFAULT_STAC_API = (os.getenv("STAC_API_URL") or "").strip() or None
 DEFAULT_COLLECTION = "sentinel-1-grd"
 WGS84_GEOD = Geod(ellps="WGS84")
 _BBOX_WARN_TOL = 1e-7
@@ -143,6 +143,56 @@ def _shape_from_geojson(geometry: Optional[Dict[str, Any]]):
         return GeometryCollection()
 
 
+def _iter_polygonal_parts(geom) -> Iterable[Any]:
+    """Yield polygonal members from arbitrary Shapely geometries."""
+    if geom is None or getattr(geom, "is_empty", True):
+        return
+    geom_type = getattr(geom, "geom_type", None)
+    if geom_type == "Polygon":
+        yield geom
+        return
+    if geom_type == "MultiPolygon":
+        for part in geom.geoms:
+            if not getattr(part, "is_empty", True):
+                yield part
+        return
+    if geom_type == "GeometryCollection":
+        for part in geom.geoms:
+            yield from _iter_polygonal_parts(part)
+
+
+def normalize_polygonal_shapely_geometry(geom):
+    """Keep only polygonal area from a geometry and merge it into a transform-safe shape."""
+    geom = _repair_shapely_geometry(geom)
+    if geom is None or getattr(geom, "is_empty", True):
+        return GeometryCollection()
+
+    polygonal_parts = [part for part in _iter_polygonal_parts(geom) if not getattr(part, "is_empty", True)]
+    if not polygonal_parts:
+        return GeometryCollection()
+
+    merged = unary_union(polygonal_parts) if len(polygonal_parts) > 1 else polygonal_parts[0]
+    merged = _repair_shapely_geometry(merged)
+    if merged is None or getattr(merged, "is_empty", True):
+        return GeometryCollection()
+    if getattr(merged, "geom_type", None) in {"Polygon", "MultiPolygon"}:
+        return merged
+
+    polygonal_parts = [part for part in _iter_polygonal_parts(merged) if not getattr(part, "is_empty", True)]
+    if not polygonal_parts:
+        return GeometryCollection()
+    merged = unary_union(polygonal_parts) if len(polygonal_parts) > 1 else polygonal_parts[0]
+    return _repair_shapely_geometry(merged)
+
+
+def normalize_polygonal_geojson_geometry(geometry: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return a Polygon/MultiPolygon GeoJSON geometry, dropping line/point-only members."""
+    geom = normalize_polygonal_shapely_geometry(_shape_from_geojson(geometry))
+    if geom.is_empty:
+        return None
+    return mapping(geom)
+
+
 def geodesic_area_wgs84(geom) -> float:
     if geom is None or geom.is_empty:
         return 0.0
@@ -193,7 +243,7 @@ def load_geojson_aoi(geojson_path: str | Path) -> Tuple[List[float], Dict[str, A
         raise ValueError(f"Khong tim thay geometry hop le trong {path}")
 
     raw_geometry = geoms[0] if len(geoms) == 1 else {"type": "GeometryCollection", "geometries": geoms}
-    aoi_geom = _shape_from_geojson(raw_geometry)
+    aoi_geom = normalize_polygonal_shapely_geometry(_shape_from_geojson(raw_geometry))
     if aoi_geom.is_empty:
         raise ValueError(f"Khong chuyen duoc AOI geometry thanh hinh hop le trong {path}")
 
@@ -276,7 +326,7 @@ def bbox_to_geometry(bbox: List[float]) -> Dict[str, Any]:
 
 def _resolve_item_geometry(item: Dict[str, Any]):
     item_geometry = item.get("geometry")
-    geom = _shape_from_geojson(item_geometry)
+    geom = normalize_polygonal_shapely_geometry(_shape_from_geojson(item_geometry))
     if not geom.is_empty:
         return geom, "geometry", mapping(geom)
 
@@ -284,7 +334,7 @@ def _resolve_item_geometry(item: Dict[str, Any]):
     bbox = info.get("bbox", [])
     if len(bbox) == 4:
         bbox_geom = bbox_to_geometry(bbox)
-        geom = _shape_from_geojson(bbox_geom)
+        geom = normalize_polygonal_shapely_geometry(_shape_from_geojson(bbox_geom))
         if not geom.is_empty:
             return geom, "bbox_fallback", mapping(geom)
 
@@ -466,7 +516,7 @@ def build_seed_intersection_region_candidates(
       - all items that cover that region above `min_region_coverage` join the region
       - exact-equal regions are merged by geometry key while preserving all seed ids
     """
-    parent_geom = _shape_from_geojson(parent_aoi_geometry)
+    parent_geom = normalize_polygonal_shapely_geometry(_shape_from_geojson(parent_aoi_geometry))
     parent_area = geodesic_area_wgs84(parent_geom)
     if parent_geom.is_empty or parent_area <= 0:
         return []
@@ -485,7 +535,7 @@ def build_seed_intersection_region_candidates(
         if seed_geom is None or getattr(seed_geom, "is_empty", True):
             continue
 
-        region_geom = _repair_shapely_geometry(parent_geom.intersection(seed_geom))
+        region_geom = normalize_polygonal_shapely_geometry(parent_geom.intersection(seed_geom))
         if region_geom.is_empty:
             continue
 
@@ -673,7 +723,9 @@ class STACClient:
     """Lightweight STAC API client su dung requests."""
 
     def __init__(self, api_url: str):
-        self.api_url = api_url.rstrip("/")
+        self.api_url = str(api_url or "").strip().rstrip("/")
+        if not self.api_url:
+            raise ValueError("STAC API URL is required. Set STAC_API_URL or pass --stac-url.")
         self.session = requests.Session()
         emit_runtime_log("query_stac_download", logging.INFO, "Initialized STAC client", stac_url=self.api_url)
 
@@ -1244,6 +1296,15 @@ class S3Downloader:
             return None
         return None
 
+    @staticmethod
+    def _key_tail(key: Optional[str], parts: int = 3) -> Optional[str]:
+        if not key:
+            return None
+        pieces = [piece for piece in str(key).split("/") if piece]
+        if not pieces:
+            return None
+        return "/".join(pieces[-max(1, int(parts)):])
+
     def download_from_href(self, href: str, local_path: str) -> bool:
         """Tai file tu href ve local_path."""
         parsed = self.parse_href_to_bucket_key(href)
@@ -1375,7 +1436,29 @@ class S3Downloader:
                         )
                         return False
 
-                    aoi_in_src = transform_geom("EPSG:4326", src.crs, aoi_geometry_wgs84, antimeridian_cutting=True, precision=15)
+                    clip_geometry_wgs84 = normalize_polygonal_geojson_geometry(aoi_geometry_wgs84)
+                    if clip_geometry_wgs84 is None:
+                        emit_runtime_log(
+                            "query_stac_download",
+                            logging.ERROR,
+                            "Subset failed because clip geometry has no polygonal area",
+                            href=href,
+                            local_path=local_path,
+                        )
+                        return False
+
+                    aoi_in_src = transform_geom("EPSG:4326", src.crs, clip_geometry_wgs84, antimeridian_cutting=True, precision=15)
+                    aoi_in_src = normalize_polygonal_geojson_geometry(aoi_in_src)
+                    if aoi_in_src is None:
+                        emit_runtime_log(
+                            "query_stac_download",
+                            logging.ERROR,
+                            "Subset failed because transformed clip geometry has no polygonal area",
+                            href=href,
+                            local_path=local_path,
+                            raster_crs=src.crs,
+                        )
+                        return False
                     aoi_bounds_src = list(geometry_bounds(aoi_in_src))
                     src_bounds = [src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top]
                     clip_bbox = bbox_intersection_bounds(aoi_bounds_src, src_bounds)
@@ -1440,13 +1523,15 @@ class S3Downloader:
                     out_file.parent.mkdir(parents=True, exist_ok=True)
                     with rasterio.open(out_file, "w", **profile) as dst:
                         dst.write(data)
+            parsed = self.parse_href_to_bucket_key(href)
             emit_runtime_log(
                 "query_stac_download",
-                logging.INFO,
+                logging.DEBUG,
                 "Completed AOI subset download",
-                href=href,
-                local_path=local_path,
-                raster_path=raster_path,
+                bucket=(parsed[0] if parsed else None),
+                key_tail=(self._key_tail(parsed[1]) if parsed else None),
+                local_name=Path(local_path).name,
+                raster_name=Path(raster_path).name,
             )
             return True
         except Exception as e:
@@ -2015,7 +2100,7 @@ def select_representative_scene_pools(
     representative_pool_mode = normalize_representative_pool_mode(representative_pool_mode)
     emit_runtime_log(
         "query_stac_download",
-        logging.INFO,
+        logging.DEBUG,
         "Selecting representative scene pools",
         representative_pool_mode=representative_pool_mode,
         pre_items=len(pre_items),
@@ -2116,7 +2201,7 @@ def select_representative_scene_pools(
         )
         emit_runtime_log(
             "query_stac_download",
-            logging.INFO,
+            logging.DEBUG,
             "Selected representative scene pools",
             selected_relaxation_name=level_cfg["level_name"],
             selected_relaxation_level=level_cfg["level"],
@@ -3449,7 +3534,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", help="Lenh con")
 
     def add_common_args(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--stac-url", default=DEFAULT_STAC_API, help="STAC API URL")
+        p.add_argument("--stac-url", default=DEFAULT_STAC_API, help="STAC API URL (required if STAC_API_URL is not set)")
         p.add_argument("--collection", default=DEFAULT_COLLECTION, help="STAC collection ID")
         p.add_argument("--bbox", type=float, nargs=4, metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"))
         p.add_argument("--geojson", default=None, help="AOI GeoJSON path (uu tien hon --bbox)")
@@ -3552,7 +3637,7 @@ def main() -> None:
     p_batch_pairs.set_defaults(func=cmd_download_generated_pairs)
 
     p_dl = subparsers.add_parser("download", help="Tai cap T1/T2 bang item IDs")
-    p_dl.add_argument("--stac-url", default=DEFAULT_STAC_API)
+    p_dl.add_argument("--stac-url", default=DEFAULT_STAC_API, help="STAC API URL (required if STAC_API_URL is not set)")
     p_dl.add_argument("--collection", default=DEFAULT_COLLECTION)
     p_dl.add_argument("--t1-id", required=True, help="STAC item ID cho T1")
     p_dl.add_argument("--t2-id", required=True, help="STAC item ID cho T2")

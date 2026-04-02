@@ -40,6 +40,7 @@ environment.yml
 no_prefix_environment.yml
 conda_syntax
 .env
+.env.json
 venv/
 .venv/
 

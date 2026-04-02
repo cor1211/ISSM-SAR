@@ -64,6 +64,8 @@ from query_stac_download import (
     build_seed_intersection_region_candidates,
     item_scene_key,
     load_geojson_aoi,
+    normalize_polygonal_geojson_geometry,
+    normalize_polygonal_shapely_geometry,
     normalize_representative_pool_mode,
     normalize_datetime_range,
     parse_required_pols,
@@ -76,16 +78,14 @@ from runtime_logging import (
     configure_root_logging,
     detect_s3_credential_source,
     DEFAULT_LOG_LEVEL,
+    ensure_root_logging,
     emit_runtime_log,
     normalize_log_level_name,
     resolve_runtime_log_level,
 )
+from runtime_env_overrides import apply_inference_env_overrides, apply_pipeline_env_overrides
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+ensure_root_logging(DEFAULT_LOG_LEVEL)
 logger = logging.getLogger("sar_pipeline")
 DEFAULT_MAX_RETRY_ATTEMPTS = 3
 AUTO_DATETIME_SENTINELS = {"", "auto", "latest_full_month", "previous_full_month", "auto_previous_full_month"}
@@ -93,6 +93,53 @@ AUTO_DATETIME_SENTINELS = {"", "auto", "latest_full_month", "previous_full_month
 
 def emit_pipeline_log(level: int, message: str, **fields: Any) -> None:
     emit_runtime_log("sar_pipeline", level, message, **fields)
+
+
+def emit_pipeline_stage(title: str, **fields: Any) -> None:
+    normalized = " ".join(str(title or "").strip().upper().split()) or "PIPELINE"
+    emit_pipeline_log(logging.INFO, f"================ {normalized} ================", **fields)
+
+
+def build_effective_runtime_settings(
+    *,
+    train_cfg: Dict[str, Any],
+    infer_config: Optional[Dict[str, Any]],
+    save_debug_artifacts: bool,
+) -> Dict[str, Any]:
+    infer_cfg = ((infer_config or {}).get("inference") or {}) if isinstance(infer_config, dict) else {}
+    return compact_jsonable(
+        {
+            "representative_pool_mode": normalize_representative_pool_mode(
+                train_cfg.get("representative_pool_mode", "auto")
+            ),
+            "min_scenes_per_half": int(train_cfg.get("min_scenes_per_half", 2)),
+            "component_item_min_coverage": float(train_cfg.get("component_item_min_coverage", 0.0)),
+            "component_min_area_ratio": float(train_cfg.get("component_min_area_ratio", 0.0)),
+            "save_debug_artifacts": bool(save_debug_artifacts),
+            "infer_device": (infer_config or {}).get("device") if isinstance(infer_config, dict) else None,
+            "infer_patch_size": infer_cfg.get("patch_size"),
+            "infer_overlap": infer_cfg.get("overlap"),
+            "infer_batch_size": infer_cfg.get("batch_size"),
+            "infer_amp": infer_cfg.get("use_amp"),
+            "infer_blending": infer_cfg.get("gaussian_blend"),
+        }
+    )
+
+
+def log_effective_runtime_settings(
+    *,
+    train_cfg: Dict[str, Any],
+    infer_config: Optional[Dict[str, Any]],
+    save_debug_artifacts: bool,
+) -> None:
+    emit_pipeline_stage(
+        "Effective Runtime Settings",
+        **build_effective_runtime_settings(
+            train_cfg=train_cfg,
+            infer_config=infer_config,
+            save_debug_artifacts=save_debug_artifacts,
+        ),
+    )
 
 
 def _safe_resolved_db_summary(env_path: str | Path) -> Dict[str, Any]:
@@ -186,32 +233,26 @@ def log_startup_checks(startup_checks: Dict[str, Any]) -> None:
 
 
 def apply_runtime_env_overrides(config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    overrides: List[Dict[str, Any]] = []
+    overrides: List[Dict[str, Any]] = list(apply_pipeline_env_overrides(config))
     stac_cfg = config.setdefault("stac", {})
 
     stac_api_url = (os.getenv("STAC_API_URL") or "").strip()
     if stac_api_url:
-        previous = stac_cfg.get("url")
         stac_cfg["url"] = stac_api_url
         overrides.append(
             {
                 "target": "stac.url",
                 "source": "env:STAC_API_URL",
-                "old_value": previous,
-                "new_value": stac_api_url,
             }
         )
 
     stac_collection = (os.getenv("STAC_COLLECTION") or os.getenv("STAC_COLLECTION_ID") or "").strip()
     if stac_collection:
-        previous = stac_cfg.get("collection")
         stac_cfg["collection"] = stac_collection
         overrides.append(
             {
                 "target": "stac.collection",
                 "source": ("env:STAC_COLLECTION" if os.getenv("STAC_COLLECTION") else "env:STAC_COLLECTION_ID"),
-                "old_value": previous,
-                "new_value": stac_collection,
             }
         )
 
@@ -223,12 +264,20 @@ def apply_runtime_env_overrides(config: Dict[str, Any]) -> List[Dict[str, Any]]:
 def log_runtime_env_overrides(config: Dict[str, Any]) -> None:
     for override in (config.get("_runtime", {}) or {}).get("env_overrides", []) or []:
         emit_pipeline_log(
-            logging.INFO,
+            logging.DEBUG,
             "Applied runtime environment override",
             target=override.get("target"),
             source=override.get("source"),
-            old_value=override.get("old_value"),
-            new_value=override.get("new_value"),
+        )
+
+
+def log_inference_env_overrides(infer_config: Dict[str, Any]) -> None:
+    for override in (infer_config.get("_runtime", {}) or {}).get("env_overrides", []) or []:
+        emit_pipeline_log(
+            logging.DEBUG,
+            "Applied inference environment override",
+            target=override.get("target"),
+            source=override.get("source"),
         )
 
 
@@ -989,6 +1038,20 @@ def infer_completion_class(summary: Dict[str, Any]) -> str:
     return "none"
 
 
+def has_only_suppressed_component_rejections(summary: Dict[str, Any]) -> bool:
+    componentization = summary.get("componentization")
+    rejected_candidates = summary.get("rejected_component_candidates")
+    if not isinstance(componentization, dict) or not isinstance(rejected_candidates, list):
+        return False
+
+    completed = int(componentization.get("completed_component_count", 0) or 0)
+    rejected = int(componentization.get("rejected_component_count", 0) or 0)
+    if completed <= 0 or rejected <= 0 or len(rejected_candidates) != rejected:
+        return False
+
+    return all(str(item.get("status", "")).strip().lower() == "suppressed" for item in rejected_candidates)
+
+
 def attach_run_log_path(summary: Dict[str, Any]) -> Dict[str, Any]:
     run_dir = summary.get("run_dir")
     if run_dir and not summary.get("run_log_path"):
@@ -1023,14 +1086,27 @@ def apply_execution_contract(
 
     if raw_status == "completed":
         final_status = "pass"
-        reason_code = default_reason_code or (
-            "COMPLETED_WITH_PARTIAL_SKIPS" if infer_completion_class(summary) == "partial" else "COMPLETED_WITH_OUTPUT"
-        )
-        reason_message = default_reason_message or (
-            "Execution finished and produced valid output artifacts."
-            if reason_code == "COMPLETED_WITH_OUTPUT"
-            else "Execution finished with valid outputs, but some periods or child components were skipped or rejected."
-        )
+        completion_class = infer_completion_class(summary)
+        if default_reason_code:
+            reason_code = default_reason_code
+        elif completion_class == "partial" and has_only_suppressed_component_rejections(summary):
+            reason_code = "COMPLETED_WITH_COMPONENT_SUPPRESSION"
+        elif completion_class == "partial":
+            reason_code = "COMPLETED_WITH_PARTIAL_SKIPS"
+        else:
+            reason_code = "COMPLETED_WITH_OUTPUT"
+
+        if default_reason_message:
+            reason_message = default_reason_message
+        elif reason_code == "COMPLETED_WITH_OUTPUT":
+            reason_message = "Execution finished and produced valid output artifacts."
+        elif reason_code == "COMPLETED_WITH_COMPONENT_SUPPRESSION":
+            reason_message = (
+                "Execution finished with valid outputs after intentionally suppressing nested child "
+                "components that were fully covered by larger regions."
+            )
+        else:
+            reason_message = "Execution finished with valid outputs, but some periods or child components were skipped or rejected."
         retryable = False
     elif raw_status == "skipped":
         final_status = "skip"
@@ -1344,13 +1420,19 @@ def geometry_mask_for_grid(
     all_touched: bool = False,
 ) -> np.ndarray:
     target_crs = rasterio.crs.CRS.from_user_input(grid["crs"])
+    normalized_geometry_wgs84 = normalize_polygonal_geojson_geometry(geometry_wgs84)
+    if normalized_geometry_wgs84 is None:
+        raise ValueError("Geometry mask requires a polygonal geometry with non-zero area.")
     geometry_in_grid = transform_geom(
         "EPSG:4326",
         target_crs,
-        geometry_wgs84,
+        normalized_geometry_wgs84,
         antimeridian_cutting=True,
         precision=15,
     )
+    geometry_in_grid = normalize_polygonal_geojson_geometry(geometry_in_grid)
+    if geometry_in_grid is None:
+        raise ValueError("Geometry mask cannot be created because the transformed geometry has no polygonal area.")
     mask = rasterize(
         [(geometry_in_grid, 1)],
         out_shape=(int(grid["height"]), int(grid["width"])),
@@ -1564,24 +1646,21 @@ def _reproject_band_to_grid(
     return destination
 
 
-def _component_mosaic_priority_key(component_result: Dict[str, Any]) -> Tuple[int, float, int, float, str]:
+def _component_mosaic_priority_key(component_result: Dict[str, Any]) -> Tuple[float, float, int, int, str]:
     selection = component_result.get("selection") or {}
     try:
         relaxation_level = int(selection.get("selected_relaxation_level"))
     except Exception:
         relaxation_level = 999
-    try:
-        combined_union_coverage = float(selection.get("combined_union_coverage"))
-    except Exception:
-        combined_union_coverage = -1.0
     pre_scene_count = int(selection.get("pre_scene_count", 0) or 0)
     post_scene_count = int(selection.get("post_scene_count", 0) or 0)
     area_ratio = float(component_result.get("area_ratio_vs_parent", 0.0) or 0.0)
+    area_m2 = float(component_result.get("area_m2", 0.0) or 0.0)
     return (
-        relaxation_level,
-        -combined_union_coverage,
-        -(pre_scene_count + post_scene_count),
         -area_ratio,
+        -area_m2,
+        -(pre_scene_count + post_scene_count),
+        relaxation_level,
         str(component_result.get("component_id") or ""),
     )
 
@@ -1617,10 +1696,13 @@ def mosaic_component_sr_multibands_to_parent(
     parent_bands = np.full((2, dst_shape[0], dst_shape[1]), np.nan, dtype=np.float32)
     filled_mask = np.zeros(dst_shape, dtype=bool)
 
+    total_parent_pixels = int(dst_shape[0] * dst_shape[1])
     contributing_component_ids: List[str] = []
     contributing_geometries = []
+    component_audit: List[Dict[str, Any]] = []
 
-    for component in sorted(component_sources, key=_component_mosaic_priority_key):
+    sorted_components = sorted(component_sources, key=_component_mosaic_priority_key)
+    for priority_rank, component in enumerate(sorted_components, start=1):
         component_geometry = component.get("geometry")
         child_sr_path = component.get("sr_multiband_path")
         if not component_geometry or not child_sr_path:
@@ -1666,11 +1748,22 @@ def mosaic_component_sr_multibands_to_parent(
 
         component_valid = warped_mask & np.isfinite(warped_bands[0]) & np.isfinite(warped_bands[1])
         new_pixels = component_valid & ~filled_mask
+        new_pixel_count = int(np.count_nonzero(new_pixels))
+        new_pixel_ratio = float(new_pixel_count / total_parent_pixels) if total_parent_pixels > 0 else 0.0
+        audit_record = {
+            "component_id": str(component.get("component_id") or ""),
+            "mosaic_priority_rank": priority_rank,
+            "contributed_to_parent_mosaic": bool(new_pixel_count > 0),
+            "new_pixel_count": new_pixel_count,
+            "new_pixel_ratio": new_pixel_ratio,
+        }
         if not np.any(new_pixels):
+            component_audit.append(compact_jsonable(audit_record))
             emit_pipeline_log(
                 logging.DEBUG,
                 "Component contributed no new pixels to parent mosaic",
                 component_id=component.get("component_id"),
+                mosaic_priority_rank=priority_rank,
             )
             continue
 
@@ -1679,6 +1772,7 @@ def mosaic_component_sr_multibands_to_parent(
         filled_mask[new_pixels] = True
         contributing_component_ids.append(str(component.get("component_id")))
         contributing_geometries.append(shape(component_geometry))
+        component_audit.append(compact_jsonable(audit_record))
 
     if not contributing_component_ids:
         emit_pipeline_log(
@@ -1711,6 +1805,7 @@ def mosaic_component_sr_multibands_to_parent(
     emit_pipeline_log(
         logging.INFO,
         "Completed parent mosaic",
+        parent_mosaic_ordering="largest_first",
         contributing_component_count=len(contributing_component_ids),
         single_child_mosaic=(len(contributing_component_ids) == 1),
         contributing_component_ids=contributing_component_ids,
@@ -1723,6 +1818,8 @@ def mosaic_component_sr_multibands_to_parent(
         "supported_area_m2": supported_area_m2,
         "supported_area_ratio": supported_area_ratio,
         "contributing_component_ids": contributing_component_ids,
+        "component_audit": component_audit,
+        "parent_mosaic_ordering": "largest_first",
         "grid": {
             "crs": parent_sr_grid["crs"],
             "width": parent_sr_grid["width"],
@@ -2103,14 +2200,14 @@ def _resolve_sr_item_id(summary: Dict[str, Any], fallback: Optional[str | Path] 
 
 def _resolve_sr_s3_prefix(summary: Dict[str, Any]) -> str:
     if summary.get("period") is not None and summary.get("component") is not None:
-        return os.getenv("SR_S3_PREFIX_MONTHLY_COMPONENT", os.getenv("SR_S3_PREFIX_ROOT", "issm-sar-sr-x2").rstrip("/") + "/monthly-component")
+        return os.getenv("SR_S3_PREFIX_MONTHLY_COMPONENT", "issm-sar-sr-x2/monthly-component")
     if summary.get("period") is not None:
-        return os.getenv("SR_S3_PREFIX_MONTHLY", os.getenv("SR_S3_PREFIX_ROOT", "issm-sar-sr-x2").rstrip("/") + "/monthly")
+        return os.getenv("SR_S3_PREFIX_MONTHLY", "issm-sar-sr-x2/monthly")
     if summary.get("anchor") is not None:
-        return os.getenv("SR_S3_PREFIX_ANCHOR_WINDOW", os.getenv("SR_S3_PREFIX_ROOT", "issm-sar-sr-x2").rstrip("/") + "/anchor-window")
+        return os.getenv("SR_S3_PREFIX_ANCHOR_WINDOW", "issm-sar-sr-x2/anchor-window")
     if str(summary.get("workflow_mode") or "") == "exact_pair":
-        return os.getenv("SR_S3_PREFIX_EXACT", os.getenv("SR_S3_PREFIX_ROOT", "issm-sar-sr-x2").rstrip("/") + "/exact")
-    return os.getenv("SR_S3_PREFIX_DEFAULT", os.getenv("SR_S3_PREFIX_ROOT", "issm-sar-sr-x2"))
+        return os.getenv("SR_S3_PREFIX_EXACT", "issm-sar-sr-x2/exact")
+    return os.getenv("SR_S3_PREFIX_DEFAULT", "issm-sar-sr-x2")
 
 
 def _resolve_sr_object_key(summary: Dict[str, Any], item_id: str, filename: str) -> str:
@@ -2141,9 +2238,9 @@ def _resolve_sr_href(
         return _local_href(filename)
     object_key = _resolve_sr_object_key(summary, item_id, published_filename or Path(filename).name)
     if normalized_mode == "s3":
-        bucket = os.getenv("SR_S3_BUCKET") or os.getenv("S3_BUCKET")
+        bucket = os.getenv("SR_S3_BUCKET")
         if not bucket:
-            raise ValueError("SR_S3_BUCKET or S3_BUCKET is required when SR href mode is 's3'.")
+            raise ValueError("SR_S3_BUCKET is required when SR href mode is 's3'.")
         return f"s3://{bucket}/{object_key}"
     if normalized_mode == "http":
         base_url = os.getenv("SR_PUBLIC_BASE_URL")
@@ -2151,7 +2248,7 @@ def _resolve_sr_href(
             raise ValueError("SR_PUBLIC_BASE_URL is required when SR href mode is 'http'.")
         return _join_url(base_url, object_key)
     if normalized_mode == "stac_api":
-        root_url = os.getenv("SR_STAC_ROOT_URL") or os.getenv("STAC_API_URL")
+        root_url = _resolve_sr_stac_root_url()
         collection_name = _resolve_sr_collection_name(summary)
         if not root_url:
             raise ValueError("SR_STAC_ROOT_URL or STAC_API_URL is required when item href mode is 'stac_api'.")
@@ -2160,7 +2257,7 @@ def _resolve_sr_href(
 
 
 def _resolve_sr_root_links(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
-    root_url = os.getenv("SR_STAC_ROOT_URL") or os.getenv("STAC_API_URL")
+    root_url = _resolve_sr_stac_root_url()
     if not root_url:
         return []
     collection_name = _resolve_sr_collection_name(summary)
@@ -2170,6 +2267,10 @@ def _resolve_sr_root_links(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
         {"rel": "parent", "type": "application/json", "href": collection_href},
         {"rel": "root", "type": "application/json", "href": root_url.rstrip("/") + "/"},
     ]
+
+
+def _resolve_sr_stac_root_url() -> str:
+    return str(os.getenv("SR_STAC_ROOT_URL") or os.getenv("STAC_API_URL") or "").strip()
 
 
 def _summarize_source_items(items: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -2557,10 +2658,67 @@ def _component_candidate_sort_key(candidate: Dict[str, Any]) -> Tuple[float, flo
     )
 
 
-def _component_geometry_contains(container: Dict[str, Any], inner: Dict[str, Any]) -> bool:
+def _component_tolerant_containment_metrics(container: Dict[str, Any], inner: Dict[str, Any]) -> Dict[str, float | bool]:
     container_geom = shape(container["geometry"])
     inner_geom = shape(inner["geometry"])
-    return bool(container_geom.equals(inner_geom) or container_geom.covers(inner_geom))
+    inner_area_m2 = float(inner.get("area_m2") or geodesic_area_wgs84(inner_geom) or 0.0)
+    if container_geom.is_empty or inner_geom.is_empty:
+        return {
+            "contained": False,
+            "difference_area_m2": inner_area_m2,
+            "difference_area_ratio": 1.0 if inner_area_m2 > 0 else 0.0,
+            "tolerance_m2": 0.0,
+        }
+
+    exact_contains = bool(container_geom.equals(inner_geom) or container_geom.covers(inner_geom))
+    difference_geom = normalize_polygonal_shapely_geometry(inner_geom.difference(container_geom))
+    difference_area_m2 = float(geodesic_area_wgs84(difference_geom))
+    tolerance_m2 = max(1.0, 1e-8 * max(inner_area_m2, 0.0))
+    difference_area_ratio = float(difference_area_m2 / inner_area_m2) if inner_area_m2 > 0 else 0.0
+    return {
+        "contained": bool(exact_contains or difference_area_m2 <= tolerance_m2),
+        "difference_area_m2": difference_area_m2,
+        "difference_area_ratio": difference_area_ratio,
+        "tolerance_m2": tolerance_m2,
+    }
+
+
+def _component_geometry_contains(container: Dict[str, Any], inner: Dict[str, Any]) -> bool:
+    return bool(_component_tolerant_containment_metrics(container, inner)["contained"])
+
+
+def _component_rejection_message(reasons: List[str]) -> str:
+    if "CONTAINED_BY_VALID_LARGER_REGION" in reasons:
+        return "Suppressed because a larger child already covers this region within geometric tolerance."
+    if "NO_VALID_REPRESENTATIVE_SELECTION" in reasons:
+        return "Rejected because no valid representative pre/post scene pools remained for this child region."
+    if "PRE_SCENE_COUNT_BELOW_MIN" in reasons and "POST_SCENE_COUNT_BELOW_MIN" in reasons:
+        return "Rejected because both pre and post pools fell below the minimum scene count."
+    if "PRE_SCENE_COUNT_BELOW_MIN" in reasons:
+        return "Rejected because the pre-scene pool fell below the minimum scene count."
+    if "POST_SCENE_COUNT_BELOW_MIN" in reasons:
+        return "Rejected because the post-scene pool fell below the minimum scene count."
+    if "NO_PRE_ITEMS_MEET_REGION_COVERAGE_THRESHOLD" in reasons:
+        return "Rejected because no pre-scene met the child coverage threshold."
+    if "NO_POST_ITEMS_MEET_REGION_COVERAGE_THRESHOLD" in reasons:
+        return "Rejected because no post-scene met the child coverage threshold."
+    if "REGION_AREA_RATIO_BELOW_MIN" in reasons:
+        return "Rejected because the child region was smaller than the configured minimum parent-area ratio."
+    return "Rejected because the child region did not pass the component-selection rules."
+
+
+def _component_selection_decision_summary(component: Dict[str, Any], *, contributed: Optional[bool] = None) -> Dict[str, Any]:
+    selection = component.get("selection") or {}
+    summary = {
+        "selected_relaxation_name": selection.get("selected_relaxation_name"),
+        "scene_signature_mode": selection.get("scene_signature_mode"),
+        "pre_scene_count": selection.get("pre_scene_count"),
+        "post_scene_count": selection.get("post_scene_count"),
+        "area_ratio_vs_parent": component.get("area_ratio_vs_parent"),
+    }
+    if contributed is not None:
+        summary["contributed_to_parent_mosaic"] = bool(contributed)
+    return compact_jsonable(summary)
 
 
 def select_seed_intersection_component_candidates(
@@ -2677,6 +2835,10 @@ def select_seed_intersection_component_candidates(
         )
         if selection is None:
             candidate_record["status"] = "rejected"
+            candidate_record["reason_code"] = "NO_VALID_REPRESENTATIVE_SELECTION"
+            candidate_record["reason_message"] = (
+                "No valid representative pre/post pools remained after signature filtering for this child region."
+            )
             candidate_record["reject_reasons"] = [
                 "NO_VALID_REPRESENTATIVE_SELECTION",
                 "No valid representative pre/post pools remained after signature filtering for this child region.",
@@ -2694,13 +2856,30 @@ def select_seed_intersection_component_candidates(
 
         candidate_record["status"] = "selected"
         candidate_record["selection"] = selection
+        candidate_record["why_kept"] = (
+            "Kept because the child passed coverage checks and retained a valid representative pre/post scene pool."
+        )
+        candidate_record["human_summary"] = (
+            f"Selected child region with {selection.get('pre_scene_count')} pre scenes and "
+            f"{selection.get('post_scene_count')} post scenes."
+        )
+        candidate_record["decision_summary"] = _component_selection_decision_summary(candidate_record)
         successful.append(candidate_record)
 
     successful.sort(key=_component_candidate_sort_key)
     kept: List[Dict[str, Any]] = []
     for candidate in successful:
-        container = next((existing for existing in kept if _component_geometry_contains(existing, candidate)), None)
+        containment = next(
+            (
+                (existing, _component_tolerant_containment_metrics(existing, candidate))
+                for existing in kept
+                if _component_geometry_contains(existing, candidate)
+            ),
+            None,
+        )
+        container = containment[0] if containment is not None else None
         if container is not None:
+            metrics = containment[1]
             rejected.append(
                 {
                     "candidate_region_key": candidate["candidate_region_key"],
@@ -2711,16 +2890,29 @@ def select_seed_intersection_component_candidates(
                     "seed_item_ids": candidate["seed_item_ids"],
                     "seed_item_datetimes": candidate["seed_item_datetimes"],
                     "status": "suppressed",
+                    "reason_code": "SUPPRESSED_AS_NESTED_CHILD",
                     "reject_reasons": ["CONTAINED_BY_VALID_LARGER_REGION"],
                     "suppressed_by_region_key": container["candidate_region_key"],
+                    "containment_difference_area_m2": metrics["difference_area_m2"],
+                    "containment_difference_area_ratio": metrics["difference_area_ratio"],
+                    "containment_tolerance_m2": metrics["tolerance_m2"],
+                    "why_rejected": "Suppressed because a larger child already covered this region within tolerance.",
+                    "reason_message": "Suppressed because a larger child already covered this region within tolerance.",
+                    "human_summary": (
+                        "Suppressed as a near-nested child because an earlier larger child already "
+                        "covered the same region within geometric tolerance."
+                    ),
                 }
             )
             emit_pipeline_log(
                 logging.DEBUG,
-                "Rejected component child candidate because a larger valid region contains it",
+                "Rejected component child candidate because a larger valid region contains it within tolerance",
                 candidate_region_key=candidate["candidate_region_key"],
                 suppressed_by_region_key=container["candidate_region_key"],
                 area_ratio_vs_parent=candidate["area_ratio_vs_parent"],
+                difference_area_m2=metrics["difference_area_m2"],
+                difference_area_ratio=metrics["difference_area_ratio"],
+                tolerance_m2=metrics["tolerance_m2"],
             )
             continue
         kept.append(candidate)
@@ -2728,6 +2920,7 @@ def select_seed_intersection_component_candidates(
     for idx, candidate in enumerate(kept, start=1):
         candidate["component_id"] = f"child_{idx:03d}"
         candidate["pair_id"] = f"period_{period['period_id']}__{candidate['component_id']}"
+        candidate["decision_summary"] = _component_selection_decision_summary(candidate)
         emit_pipeline_log(
             logging.INFO,
             "Selected component child candidate",
@@ -2737,12 +2930,38 @@ def select_seed_intersection_component_candidates(
             pre_scene_count=((candidate.get("selection") or {}).get("pre_scene_count")),
             post_scene_count=((candidate.get("selection") or {}).get("post_scene_count")),
         )
+    component_id_by_region_key = {
+        candidate["candidate_region_key"]: candidate["component_id"]
+        for candidate in kept
+        if candidate.get("candidate_region_key") and candidate.get("component_id")
+    }
+    for rejected_candidate in rejected:
+        if rejected_candidate.get("status") != "suppressed":
+            rejected_candidate["why_rejected"] = _component_rejection_message(
+                list(rejected_candidate.get("reject_reasons", []) or [])
+            )
+            rejected_candidate.setdefault(
+                "reason_code",
+                str((rejected_candidate.get("reject_reasons") or ["REJECTED_COMPONENT_CANDIDATE"])[0]),
+            )
+            rejected_candidate.setdefault("reason_message", rejected_candidate["why_rejected"])
+            rejected_candidate.setdefault("human_summary", rejected_candidate["why_rejected"])
+            continue
+        suppressed_by_key = rejected_candidate.get("suppressed_by_region_key")
+        if suppressed_by_key in component_id_by_region_key:
+            rejected_candidate["suppressed_by_component_id"] = component_id_by_region_key[suppressed_by_key]
+        rejected_candidate.setdefault("reason_message", rejected_candidate.get("why_rejected"))
+    for idx, rejected_candidate in enumerate(rejected, start=1):
+        if not rejected_candidate.get("component_id"):
+            prefix = "suppressed_child" if rejected_candidate.get("status") == "suppressed" else "rejected_child"
+            rejected_candidate["component_id"] = f"{prefix}_{idx:03d}"
     emit_pipeline_log(
         logging.INFO,
         "Component child selection summary",
         period_id=period.get("period_id"),
         kept_count=len(kept),
         rejected_count=len(rejected),
+        suppressed_count=sum(1 for item in rejected if item.get("status") == "suppressed"),
     )
     return kept, rejected
 
@@ -2916,7 +3135,7 @@ def download_window_assets(
             asset_key, href = asset_info
             local_path = out_dir / f"{dt_token}__{item_token}__{pol.lower()}.tif"
             emit_pipeline_log(
-                logging.INFO,
+                logging.DEBUG,
                 "Downloading AOI subset for selected scene",
                 item_id=info["id"],
                 item_datetime=info["datetime"],
@@ -3241,6 +3460,10 @@ def run_exact_pair_pipeline(config: Dict[str, Any], geojson_path: str, output_ro
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
     infer_config = load_yaml(infer_cfg.get("config_path", "config/infer_config.yaml"))
+    infer_overrides = apply_inference_env_overrides(infer_config)
+    if infer_overrides:
+        infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
+        log_inference_env_overrides(infer_config)
     if device:
         infer_config["device"] = device
 
@@ -3431,6 +3654,13 @@ def run_stac_representative_calendar_pipeline(
     run_dir = resolve_pipeline_run_dir(config, run_root, aoi_id)
     periods_root = ensure_dir(run_dir / "periods")
 
+    emit_pipeline_stage(
+        "STAC Query",
+        stac_url=stac_cfg.get("url", DEFAULT_STAC_API),
+        collection=stac_cfg.get("collection", DEFAULT_COLLECTION),
+        datetime=datetime_filter,
+        limit=int(stac_cfg.get("limit", 300)),
+    )
     client = STACClient(stac_cfg.get("url", DEFAULT_STAC_API))
     query_args = build_query_namespace(config, str(aoi_path))
     items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, query_args, required_pols)
@@ -3561,8 +3791,17 @@ def run_stac_representative_calendar_pipeline(
             "Inference dependencies are missing. Please install the production inference environment before running sar_pipeline.py."
         ) from exc
     infer_config = load_yaml(infer_cfg.get("config_path", "config/infer_config.yaml"))
+    infer_overrides = apply_inference_env_overrides(infer_config)
+    if infer_overrides:
+        infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
+        log_inference_env_overrides(infer_config)
     if device:
         infer_config["device"] = device
+    log_effective_runtime_settings(
+        train_cfg=train_cfg,
+        infer_config=infer_config,
+        save_debug_artifacts=save_debug_artifacts,
+    )
     inferencer = SARInferencer(infer_config)
 
     period_results: List[Dict[str, Any]] = []
@@ -3603,6 +3842,12 @@ def run_stac_representative_calendar_pipeline(
         )
 
         if componentize_seed_intersections:
+            emit_pipeline_stage(
+                "Component Selection",
+                period_id=period["period_id"],
+                pre_items=len(pre_items),
+                post_items=len(post_items),
+            )
             selected_components, rejected_components = select_seed_intersection_component_candidates(
                 pre_items=pre_items,
                 post_items=post_items,
@@ -3666,9 +3911,25 @@ def run_stac_representative_calendar_pipeline(
                         "min_area_ratio": component_min_area_ratio,
                         "completed_component_count": 0,
                         "rejected_component_count": len(rejected_components),
+                        "suppressed_component_count": sum(
+                            1 for item in rejected_components if item.get("status") == "suppressed"
+                        ),
                         "parent_supported_area_ratio": 0.0,
+                        "parent_mosaic_ordering": "largest_first",
+                        "decision_summary": {
+                            "suppression_policy": "largest_first_tolerant_nested_pruning",
+                            "suppressed_component_count": sum(
+                                1 for item in rejected_components if item.get("status") == "suppressed"
+                            ),
+                            "completed_component_count": 0,
+                            "parent_mosaic_ordering": "largest_first",
+                        },
                     },
                     "rejected_component_candidates": rejected_components,
+                    "human_summary": (
+                        "No child component survived selection, so the representative period was skipped "
+                        "before parent mosaic execution."
+                    ),
                 }
                 summary_json, summary_md = write_representative_period_summary(period_dir, period_summary)
                 period_results.append(
@@ -3713,6 +3974,11 @@ def run_stac_representative_calendar_pipeline(
                         auto_cleanup=True,
                     )
                 component_mosaic_sources: List[Dict[str, Any]] = []
+                emit_pipeline_stage(
+                    "Component Execution",
+                    period_id=period["period_id"],
+                    selected_component_count=len(selected_components),
+                )
                 for component in selected_components:
                     selection = component["selection"]
                     component_id = component["component_id"]
@@ -3817,10 +4083,17 @@ def run_stac_representative_calendar_pipeline(
                         "status": "completed",
                         "area_m2": component["area_m2"],
                         "area_ratio_vs_parent": component["area_ratio_vs_parent"],
+                        "pre_scene_count": child_manifest["pre_scene_count"],
+                        "post_scene_count": child_manifest["post_scene_count"],
+                        "selected_relaxation_name": child_manifest["selected_relaxation_name"],
+                        "scene_signature_mode": child_manifest["scene_signature_mode"],
                         "seed_item_ids": component["seed_item_ids"],
                         "seed_item_datetimes": component["seed_item_datetimes"],
                         "geometry": component_geometry,
                         "bbox": component_bbox,
+                        "why_kept": component.get("why_kept"),
+                        "human_summary": component.get("human_summary"),
+                        "decision_summary": component.get("decision_summary"),
                         "selection": {
                             "selection_priority": child_manifest.get("selection_priority", "balanced_period_representation"),
                             "selected_relaxation_level": child_manifest["selected_relaxation_level"],
@@ -3877,6 +4150,7 @@ def run_stac_representative_calendar_pipeline(
                         {
                             "component_id": component_id,
                             "area_ratio_vs_parent": component["area_ratio_vs_parent"],
+                            "area_m2": component["area_m2"],
                             "selection": component_record["selection"],
                             "geometry": component_geometry,
                             "sr_multiband_path": str(transient_output_tif),
@@ -3886,6 +4160,12 @@ def run_stac_representative_calendar_pipeline(
                     parent_source_t2_items.extend(selection["pre_items"])
 
                 public_item_id = _whole_monthly_sr_item_id(aoi_id, period["period_id"])
+                emit_pipeline_stage(
+                    "Parent Mosaic",
+                    period_id=period["period_id"],
+                    selected_component_count=len(component_mosaic_sources),
+                    parent_mosaic_ordering="largest_first",
+                )
                 emit_pipeline_log(
                     logging.INFO,
                     "Running parent mosaic from completed component outputs",
@@ -3922,6 +4202,32 @@ def run_stac_representative_calendar_pipeline(
                     final_resampling_name=str(out_cfg.get("final_resampling", "bilinear")),
                 )
 
+            component_audit_by_id = {
+                str(entry.get("component_id")): entry for entry in parent_mosaic.get("component_audit", []) or []
+            }
+            for component_record in component_results:
+                audit = component_audit_by_id.get(str(component_record.get("component_id"))) or {}
+                contributed = bool(audit.get("contributed_to_parent_mosaic", False))
+                component_record["mosaic_priority_rank"] = audit.get("mosaic_priority_rank")
+                component_record["contributed_to_parent_mosaic"] = contributed
+                component_record["new_pixel_count"] = int(audit.get("new_pixel_count", 0) or 0)
+                component_record["new_pixel_ratio"] = float(audit.get("new_pixel_ratio", 0.0) or 0.0)
+                component_record["decision_summary"] = compact_jsonable(
+                    {
+                        **(component_record.get("decision_summary") or {}),
+                        "mosaic_priority_rank": audit.get("mosaic_priority_rank"),
+                        "contributed_to_parent_mosaic": contributed,
+                        "new_pixel_count": component_record["new_pixel_count"],
+                        "new_pixel_ratio": component_record["new_pixel_ratio"],
+                    }
+                )
+                component_record["human_summary"] = (
+                    f"Child kept with {component_record['pre_scene_count']} pre scenes and "
+                    f"{component_record['post_scene_count']} post scenes; "
+                    f"{'contributed new parent pixels' if contributed else 'did not add new parent pixels after largest-first mosaic'}."
+                )
+
+            suppressed_component_count = sum(1 for item in rejected_components if item.get("status") == "suppressed")
             period_summary = {
                 "status": "completed",
                 "workflow_mode": "stac_trainlike_composite",
@@ -3953,11 +4259,20 @@ def run_stac_representative_calendar_pipeline(
                     "min_area_ratio": component_min_area_ratio,
                     "completed_component_count": len(component_results),
                     "rejected_component_count": len(rejected_components),
+                    "suppressed_component_count": suppressed_component_count,
                     "parent_supported_area_m2": parent_mosaic["supported_area_m2"],
                     "parent_supported_area_ratio": parent_mosaic["supported_area_ratio"],
                     "parent_supported_bbox": canonical_bbox_from_geometry(parent_mosaic["supported_geometry"]),
                     "parent_contributing_component_ids": parent_mosaic["contributing_component_ids"],
+                    "parent_mosaic_ordering": parent_mosaic.get("parent_mosaic_ordering", "largest_first"),
                     "component_parent_mosaic": component_parent_mosaic,
+                    "decision_summary": {
+                        "suppression_policy": "largest_first_tolerant_nested_pruning",
+                        "suppressed_component_count": suppressed_component_count,
+                        "completed_component_count": len(component_results),
+                        "parent_contributing_component_ids": parent_mosaic["contributing_component_ids"],
+                        "parent_mosaic_ordering": parent_mosaic.get("parent_mosaic_ordering", "largest_first"),
+                    },
                 },
                 "component_results": component_results,
                 "rejected_component_candidates": rejected_components,
@@ -3990,6 +4305,11 @@ def run_stac_representative_calendar_pipeline(
                     "save_debug_artifacts": save_debug_artifacts,
                     **build_final_output_trace_config(out_cfg),
                 },
+                "human_summary": (
+                    f"Processed {len(component_results)} child components after suppressing "
+                    f"{suppressed_component_count} near-nested candidates. Parent mosaic used largest-first ordering "
+                    f"and received new pixels from {len(parent_mosaic['contributing_component_ids'])} child components."
+                ),
             }
             if compatibility_info is not None:
                 period_summary["compatibility"] = compatibility_info
@@ -4001,6 +4321,15 @@ def run_stac_representative_calendar_pipeline(
                 source_t2_items=parent_source_t2_items,
             )
             summary_json, summary_md = write_representative_period_summary(period_dir, period_summary)
+            emit_pipeline_stage(
+                "Output Summary",
+                period_id=period["period_id"],
+                status=period_summary.get("status"),
+                public_item_id=public_item_id,
+                completed_component_count=len(component_results),
+                suppressed_component_count=suppressed_component_count,
+                contributing_component_ids=parent_mosaic["contributing_component_ids"],
+            )
             period_results.append(
                 {
                     "period_id": period["period_id"],
@@ -4519,6 +4848,12 @@ def run_gee_representative_calendar_pipeline(
         raise RuntimeError("earthengine-api is required for gee_trainlike_composite mode.") from exc
     filter_geom = ee.Geometry(aoi_geometry)
     clip_geom = clip_geometry(clip_mode_name, aoi_bbox, aoi_geometry)
+    emit_pipeline_stage(
+        "GEE Query",
+        collection=collection_id,
+        datetime=datetime_filter,
+        orbit_pass=orbit_pass,
+    )
     full_collection = build_collection(
         collection_id=collection_id,
         filter_geom=filter_geom,
@@ -4529,8 +4864,17 @@ def run_gee_representative_calendar_pipeline(
     gee_items = collection_scene_items(full_collection, aoi_bbox)
 
     infer_config = load_yaml(infer_cfg.get("config_path", "config/infer_config.yaml"))
+    infer_overrides = apply_inference_env_overrides(infer_config)
+    if infer_overrides:
+        infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
+        log_inference_env_overrides(infer_config)
     if device:
         infer_config["device"] = device
+    log_effective_runtime_settings(
+        train_cfg=train_cfg,
+        infer_config=infer_config,
+        save_debug_artifacts=save_debug_artifacts,
+    )
     inferencer = SARInferencer(infer_config)
 
     period_results: List[Dict[str, Any]] = []
@@ -4553,6 +4897,12 @@ def run_gee_representative_calendar_pipeline(
         )
 
         if componentize_seed_intersections:
+            emit_pipeline_stage(
+                "Component Selection",
+                period_id=period["period_id"],
+                pre_items=len(pre_items),
+                post_items=len(post_items),
+            )
             selected_components, rejected_components = select_seed_intersection_component_candidates(
                 pre_items=pre_items,
                 post_items=post_items,
@@ -4600,9 +4950,25 @@ def run_gee_representative_calendar_pipeline(
                         "min_area_ratio": component_min_area_ratio,
                         "completed_component_count": 0,
                         "rejected_component_count": len(rejected_components),
+                        "suppressed_component_count": sum(
+                            1 for item in rejected_components if item.get("status") == "suppressed"
+                        ),
                         "parent_supported_area_ratio": 0.0,
+                        "parent_mosaic_ordering": "largest_first",
+                        "decision_summary": {
+                            "suppression_policy": "largest_first_tolerant_nested_pruning",
+                            "suppressed_component_count": sum(
+                                1 for item in rejected_components if item.get("status") == "suppressed"
+                            ),
+                            "completed_component_count": 0,
+                            "parent_mosaic_ordering": "largest_first",
+                        },
                     },
                     "rejected_component_candidates": rejected_components,
+                    "human_summary": (
+                        "No child component survived selection, so the representative period was skipped "
+                        "before parent mosaic execution."
+                    ),
                 }
                 summary_json, summary_md = write_representative_period_summary(period_dir, period_summary)
                 period_results.append(
@@ -4631,6 +4997,11 @@ def run_gee_representative_calendar_pipeline(
                     transient_path=transient_root / "components",
                 )
                 component_mosaic_sources: List[Dict[str, Any]] = []
+                emit_pipeline_stage(
+                    "Component Execution",
+                    period_id=period["period_id"],
+                    selected_component_count=len(selected_components),
+                )
                 for component in selected_components:
                     selection = component["selection"]
                     component_id = component["component_id"]
@@ -4741,10 +5112,17 @@ def run_gee_representative_calendar_pipeline(
                         "status": "completed",
                         "area_m2": component["area_m2"],
                         "area_ratio_vs_parent": component["area_ratio_vs_parent"],
+                        "pre_scene_count": child_manifest["pre_scene_count"],
+                        "post_scene_count": child_manifest["post_scene_count"],
+                        "selected_relaxation_name": child_manifest["selected_relaxation_name"],
+                        "scene_signature_mode": child_manifest["scene_signature_mode"],
                         "seed_item_ids": component["seed_item_ids"],
                         "seed_item_datetimes": component["seed_item_datetimes"],
                         "geometry": component_geometry,
                         "bbox": component_bbox,
+                        "why_kept": component.get("why_kept"),
+                        "human_summary": component.get("human_summary"),
+                        "decision_summary": component.get("decision_summary"),
                         "validation": validation,
                         "selection": {
                             "selection_priority": child_manifest.get("selection_priority", "balanced_period_representation"),
@@ -4793,6 +5171,7 @@ def run_gee_representative_calendar_pipeline(
                         {
                             "component_id": component_id,
                             "area_ratio_vs_parent": component["area_ratio_vs_parent"],
+                            "area_m2": component["area_m2"],
                             "selection": component_record["selection"],
                             "geometry": component_geometry,
                             "sr_multiband_path": str(transient_output_tif),
@@ -4802,6 +5181,12 @@ def run_gee_representative_calendar_pipeline(
                     parent_source_t2_items.extend(selection["pre_items"])
 
                 public_item_id = _whole_monthly_sr_item_id(aoi_id, period["period_id"])
+                emit_pipeline_stage(
+                    "Parent Mosaic",
+                    period_id=period["period_id"],
+                    selected_component_count=len(component_mosaic_sources),
+                    parent_mosaic_ordering="largest_first",
+                )
                 parent_transient_output_tif = transient_root / f"{public_item_id}_parent_SR_x2.tif"
                 parent_mosaic = mosaic_component_sr_multibands_to_parent(
                     component_sources=component_mosaic_sources,
@@ -4831,6 +5216,32 @@ def run_gee_representative_calendar_pipeline(
                     final_resampling_name=str(out_cfg.get("final_resampling", "bilinear")),
                 )
 
+            component_audit_by_id = {
+                str(entry.get("component_id")): entry for entry in parent_mosaic.get("component_audit", []) or []
+            }
+            for component_record in component_results:
+                audit = component_audit_by_id.get(str(component_record.get("component_id"))) or {}
+                contributed = bool(audit.get("contributed_to_parent_mosaic", False))
+                component_record["mosaic_priority_rank"] = audit.get("mosaic_priority_rank")
+                component_record["contributed_to_parent_mosaic"] = contributed
+                component_record["new_pixel_count"] = int(audit.get("new_pixel_count", 0) or 0)
+                component_record["new_pixel_ratio"] = float(audit.get("new_pixel_ratio", 0.0) or 0.0)
+                component_record["decision_summary"] = compact_jsonable(
+                    {
+                        **(component_record.get("decision_summary") or {}),
+                        "mosaic_priority_rank": audit.get("mosaic_priority_rank"),
+                        "contributed_to_parent_mosaic": contributed,
+                        "new_pixel_count": component_record["new_pixel_count"],
+                        "new_pixel_ratio": component_record["new_pixel_ratio"],
+                    }
+                )
+                component_record["human_summary"] = (
+                    f"Child kept with {component_record['pre_scene_count']} pre scenes and "
+                    f"{component_record['post_scene_count']} post scenes; "
+                    f"{'contributed new parent pixels' if contributed else 'did not add new parent pixels after largest-first mosaic'}."
+                )
+
+            suppressed_component_count = sum(1 for item in rejected_components if item.get("status") == "suppressed")
             period_summary = {
                 "status": "completed",
                 "workflow_mode": "gee_trainlike_composite",
@@ -4862,11 +5273,20 @@ def run_gee_representative_calendar_pipeline(
                     "min_area_ratio": component_min_area_ratio,
                     "completed_component_count": len(component_results),
                     "rejected_component_count": len(rejected_components),
+                    "suppressed_component_count": suppressed_component_count,
                     "parent_supported_area_m2": parent_mosaic["supported_area_m2"],
                     "parent_supported_area_ratio": parent_mosaic["supported_area_ratio"],
                     "parent_supported_bbox": canonical_bbox_from_geometry(parent_mosaic["supported_geometry"]),
                     "parent_contributing_component_ids": parent_mosaic["contributing_component_ids"],
+                    "parent_mosaic_ordering": parent_mosaic.get("parent_mosaic_ordering", "largest_first"),
                     "component_parent_mosaic": component_parent_mosaic,
+                    "decision_summary": {
+                        "suppression_policy": "largest_first_tolerant_nested_pruning",
+                        "suppressed_component_count": suppressed_component_count,
+                        "completed_component_count": len(component_results),
+                        "parent_contributing_component_ids": parent_mosaic["contributing_component_ids"],
+                        "parent_mosaic_ordering": parent_mosaic.get("parent_mosaic_ordering", "largest_first"),
+                    },
                 },
                 "component_results": component_results,
                 "rejected_component_candidates": rejected_components,
@@ -4898,6 +5318,11 @@ def run_gee_representative_calendar_pipeline(
                     "save_debug_artifacts": save_debug_artifacts,
                     **build_final_output_trace_config(out_cfg),
                 },
+                "human_summary": (
+                    f"Processed {len(component_results)} child components after suppressing "
+                    f"{suppressed_component_count} near-nested candidates. Parent mosaic used largest-first ordering "
+                    f"and received new pixels from {len(parent_mosaic['contributing_component_ids'])} child components."
+                ),
             }
             if compatibility_info is not None:
                 period_summary["compatibility"] = compatibility_info
@@ -4909,6 +5334,15 @@ def run_gee_representative_calendar_pipeline(
                 source_t2_items=parent_source_t2_items,
             )
             summary_json, summary_md = write_representative_period_summary(period_dir, period_summary)
+            emit_pipeline_stage(
+                "Output Summary",
+                period_id=period["period_id"],
+                status=period_summary.get("status"),
+                public_item_id=public_item_id,
+                completed_component_count=len(component_results),
+                suppressed_component_count=suppressed_component_count,
+                contributing_component_ids=parent_mosaic["contributing_component_ids"],
+            )
             period_results.append(
                 {
                     "period_id": period["period_id"],
@@ -5352,6 +5786,10 @@ def run_stac_trainlike_pipeline(
         )
 
     infer_config = load_yaml(infer_cfg.get("config_path", "config/infer_config.yaml"))
+    infer_overrides = apply_inference_env_overrides(infer_config)
+    if infer_overrides:
+        infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
+        log_inference_env_overrides(infer_config)
     if device:
         infer_config["device"] = device
     inferencer = SARInferencer(infer_config)
@@ -6216,6 +6654,11 @@ def main() -> None:
             )
             if config.get("logging", {}).get("startup_env_checks", True):
                 log_startup_checks(startup_checks)
+            emit_pipeline_stage(
+                "DB AOI",
+                requested_aoi_id=args.db_aoi_id,
+                db_env_path=args.db_env_path,
+            )
             record_list = fetch_active_aois_from_database(
                 aoi_id=normalize_aoi_uuid(args.db_aoi_id),
                 env_path=args.db_env_path,

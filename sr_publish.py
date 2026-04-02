@@ -18,6 +18,17 @@ class PublishError(RuntimeError):
     pass
 
 
+def _resolve_env_value(values: Dict[str, str], *keys: str) -> Optional[str]:
+    for key in keys:
+        raw = values.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
 def _utc_rfc3339_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -112,10 +123,12 @@ class PublishPlan:
 def build_s3_client_from_env(env: Optional[Dict[str, str]] = None) -> Any:
     import boto3
 
-    values = env or os.environ
-    endpoint_url = values.get("S3_ENDPOINT")
-    access_key = values.get("S3_ACCESS_KEY")
-    secret_key = values.get("S3_SECRET_KEY")
+    values = dict(os.environ)
+    if env:
+        values.update({k: str(v) for k, v in env.items() if v is not None})
+    endpoint_url = _resolve_env_value(values, "SR_S3_ENDPOINT", "S3_ENDPOINT")
+    access_key = _resolve_env_value(values, "SR_S3_ACCESS_KEY", "S3_ACCESS_KEY")
+    secret_key = _resolve_env_value(values, "SR_S3_SECRET_KEY", "S3_SECRET_KEY")
     return boto3.client(
         "s3",
         endpoint_url=endpoint_url,
@@ -158,7 +171,7 @@ def _validate_item_links(
     _ensure(collection_href is not None, "Item JSON is missing the STAC collection link.")
     _ensure(self_href is not None, "Item JSON is missing the STAC self link.")
 
-    env_root = env.get("SR_STAC_ROOT_URL") or env.get("STAC_API_URL")
+    env_root = _resolve_env_value(env, "SR_STAC_ROOT_URL", "STAC_API_URL")
     if env_root:
         _ensure(
             _normalize_url(root_href) == _normalize_url(env_root),
@@ -216,7 +229,7 @@ def build_publish_plan(
     _ensure(Path(vh_key).name == f"{item_id}_vh.tif", f"VH asset filename must be {item_id}_vh.tif.")
     _ensure(Path(vv_key).parent == Path(vh_key).parent, "VV and VH assets must live in the same S3 directory.")
 
-    expected_bucket = values.get("SR_S3_BUCKET") or values.get("S3_BUCKET")
+    expected_bucket = str(values.get("SR_S3_BUCKET") or "").strip() or None
     if expected_bucket:
         _ensure(vv_bucket == expected_bucket, f"Item assets point to bucket '{vv_bucket}', expected '{expected_bucket}'.")
 

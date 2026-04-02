@@ -36,7 +36,8 @@ from rasterio.transform import Affine
 from rasterio.warp import reproject, transform_bounds
 import torch
 import yaml
-from tqdm import tqdm
+from runtime_logging import DEFAULT_LOG_LEVEL, ensure_root_logging, format_log_message
+from runtime_env_overrides import apply_inference_env_overrides
 
 # ── project imports ──────────────────────────────────────────
 # Ensure src/ is importable directly to bypass __init__.py (and avoid PyTorch Lightning dependence)
@@ -48,12 +49,22 @@ if str(_SRC_DIR) not in sys.path:
 from model import ISSM_SAR
 
 # ── logging ──────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("SARInferencer")
+ensure_root_logging(DEFAULT_LOG_LEVEL)
+logger = logging.getLogger("infer_production")
+
+
+def emit_infer_log(level: int, message: str, **fields: Any) -> None:
+    logger.log(level, format_log_message(message, **fields))
+
+
+def log_inference_env_overrides(config: Dict[str, Any]) -> None:
+    for override in (config.get("_runtime", {}) or {}).get("env_overrides", []) or []:
+        emit_infer_log(
+            logging.DEBUG,
+            "Applied inference environment override",
+            target=override.get("target"),
+            source=override.get("source"),
+        )
 
 
 # ==============================================================
@@ -103,21 +114,27 @@ class SARInferencer:
             config: Parsed YAML config dictionary.
         """
         self.config = config
+        log_inference_env_overrides(config)
 
         # ── device ──
         device_name: str = config.get("device", "cuda")
         if device_name.startswith("cuda") and not torch.cuda.is_available():
-            logger.warning("CUDA requested but not available — falling back to CPU.")
+            emit_infer_log(
+                logging.WARNING,
+                "CUDA unavailable, falling back to CPU",
+                requested_device=device_name,
+                active_device="cpu",
+            )
             device_name = "cpu"
         self.device = torch.device(device_name)
-        logger.info(f"Device: {self.device}")
+        emit_infer_log(logging.INFO, "Inference device", device=str(self.device))
         self._log_device_overview()
 
         # ── normalisation params ──
         norm_cfg = config["normalization"]
         self.v_min: float = float(norm_cfg["v_min"])
         self.v_max: float = float(norm_cfg["v_max"])
-        logger.info(f"dB clip range: [{self.v_min}, {self.v_max}]")
+        emit_infer_log(logging.DEBUG, "Normalization setup", db_clip_min=self.v_min, db_clip_max=self.v_max)
 
         # ── inference params ──
         inf_cfg = config["inference"]
@@ -129,9 +146,15 @@ class SARInferencer:
 
         self.overlap_px: int = int(self.patch_size * self.overlap_frac)
         self.stride: int = self.patch_size - self.overlap_px
-        logger.info(
-            f"Patch={self.patch_size}, overlap={self.overlap_px}px, "
-            f"stride={self.stride}, batch={self.batch_size}, AMP={self.use_amp}, Blending={self.gaussian_blend}"
+        emit_infer_log(
+            logging.INFO,
+            "Inference tiling",
+            patch_size=self.patch_size,
+            overlap_px=self.overlap_px,
+            stride=self.stride,
+            batch_size=self.batch_size,
+            amp=self.use_amp,
+            blending=self.gaussian_blend,
         )
 
         # ── load model architecture config ──
@@ -142,11 +165,11 @@ class SARInferencer:
         model_cfg: Dict[str, Any] = arch_cfg["model"]
 
         # ── initialise two models ──
-        logger.info("Initialising VV model …")
+        emit_infer_log(logging.DEBUG, "Initializing model", band="VV")
         self.model_vv = self._load_model(model_cfg, config["ckpt_path_vv"])
         self._log_model_footprint("VV", self.model_vv)
         self._log_vram("After loading VV model")
-        logger.info("Initialising VH model …")
+        emit_infer_log(logging.DEBUG, "Initializing model", band="VH")
         self.model_vh = self._load_model(model_cfg, config["ckpt_path_vh"])
         self._log_model_footprint("VH", self.model_vh)
         self._log_vram("After loading VH model")
@@ -155,10 +178,10 @@ class SARInferencer:
         sr_patch = self.patch_size * 2
         if self.gaussian_blend:
             self.blend_window = self._create_gaussian_window(sr_patch).to(self.device)
-            logger.info(f"Gaussian blending window: {sr_patch}×{sr_patch}")
+            emit_infer_log(logging.DEBUG, "Blending window", mode="gaussian", width=sr_patch, height=sr_patch)
         else:
             self.blend_window = torch.ones((sr_patch, sr_patch), dtype=torch.float32, device=self.device)
-            logger.info(f"Simple averaging window (no Gaussian): {sr_patch}×{sr_patch}")
+            emit_infer_log(logging.DEBUG, "Blending window", mode="average", width=sr_patch, height=sr_patch)
 
     # ----------------------------------------------------------
     #  Model loading
@@ -197,7 +220,7 @@ class SARInferencer:
         model.load_state_dict(state_dict, strict=True)
         model.to(self.device)
         model.eval()
-        logger.info(f"  ✓ Loaded checkpoint: {ckpt_path.name}")
+        emit_infer_log(logging.DEBUG, "Loaded checkpoint", checkpoint=ckpt_path.name)
         return model
 
     # ----------------------------------------------------------
@@ -242,19 +265,19 @@ class SARInferencer:
     def _log_device_overview(self) -> None:
         """Log static GPU information once so VRAM planning is easier."""
         if self.device.type != "cuda" or not torch.cuda.is_available():
-            logger.info("CUDA VRAM logging disabled because inference is running on CPU.")
+            emit_infer_log(logging.DEBUG, "CUDA VRAM logging disabled", reason="cpu_inference")
             return
 
         device_index = self._cuda_device_index()
         props = torch.cuda.get_device_properties(device_index)
         total_mb = self._bytes_to_mb(props.total_memory)
-        logger.info(
-            "CUDA device: %s | Capability: %d.%d | Total VRAM: %.1f MB | SMs: %d",
-            props.name,
-            props.major,
-            props.minor,
-            total_mb,
-            props.multi_processor_count,
+        emit_infer_log(
+            logging.DEBUG,
+            "CUDA device",
+            name=props.name,
+            capability=f"{props.major}.{props.minor}",
+            total_vram_mb=round(total_mb, 1),
+            sms=props.multi_processor_count,
         )
         self._log_vram("Startup")
 
@@ -263,33 +286,30 @@ class SARInferencer:
         param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
         buffer_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
         total_bytes = param_bytes + buffer_bytes
-        logger.info(
-            "  %s model footprint | Params: %.2f M | Param MB: %.1f | Buffer MB: %.1f | Total MB: %.1f",
-            label,
-            sum(p.numel() for p in model.parameters()) / 1e6,
-            self._bytes_to_mb(param_bytes),
-            self._bytes_to_mb(buffer_bytes),
-            self._bytes_to_mb(total_bytes),
+        emit_infer_log(
+            logging.DEBUG,
+            "Model footprint",
+            band=label,
+            params_m=round(sum(p.numel() for p in model.parameters()) / 1e6, 2),
+            param_mb=round(self._bytes_to_mb(param_bytes), 1),
+            buffer_mb=round(self._bytes_to_mb(buffer_bytes), 1),
+            total_mb=round(self._bytes_to_mb(total_bytes), 1),
         )
 
     def _log_vram(self, stage: str, baseline: Optional[Dict[str, float]] = None) -> Optional[Dict[str, float]]:
-        """Log current GPU memory usage, optionally including deltas from a baseline."""
+        """Log current GPU memory usage using the minimal runtime metrics we care about."""
+        _ = baseline
         stats = self._snapshot_vram()
         if stats is None:
             return None
 
-        line = (
-            f"  [VRAM] {stage} | Free: {stats['free_mb']:.1f} MB | "
-            f"Driver-used: {stats['used_driver_mb']:.1f} MB | Allocated: {stats['allocated_mb']:.1f} MB | "
-            f"Reserved: {stats['reserved_mb']:.1f} MB | Peak alloc: {stats['peak_allocated_mb']:.1f} MB | "
-            f"Peak reserved: {stats['peak_reserved_mb']:.1f} MB"
-        )
-        if baseline is not None:
-            line += (
-                f" | Delta alloc: {stats['allocated_mb'] - baseline['allocated_mb']:+.1f} MB"
-                f" | Delta reserved: {stats['reserved_mb'] - baseline['reserved_mb']:+.1f} MB"
-            )
-        logger.info(line)
+        payload = {
+            "stage": stage,
+            "free_mb": round(stats["free_mb"], 1),
+            "allocated_mb": round(stats["allocated_mb"], 1),
+            "peak_allocated_mb": round(stats["peak_allocated_mb"], 1),
+        }
+        emit_infer_log(logging.DEBUG, "VRAM", **payload)
         return stats
 
     def _estimate_band_inference_memory(
@@ -303,12 +323,12 @@ class SARInferencer:
         input_batch_bytes = 2 * batch_len * self.patch_size * self.patch_size * np.dtype(np.float32).itemsize
         sr_batch_bytes = batch_len * sr_patch_size * sr_patch_size * np.dtype(np.float32).itemsize
         cpu_acc_bytes = 2 * (padded_h * 2) * (padded_w * 2) * np.dtype(np.float32).itemsize
-        logger.info(
-            "  Memory hints | Batch input tensors: %.1f MB | SR batch output (CPU after forward): %.1f MB | "
-            "CPU accumulators: %.1f MB",
-            self._bytes_to_mb(input_batch_bytes),
-            self._bytes_to_mb(sr_batch_bytes),
-            self._bytes_to_mb(cpu_acc_bytes),
+        emit_infer_log(
+            logging.DEBUG,
+            "Memory hints",
+            batch_input_mb=round(self._bytes_to_mb(input_batch_bytes), 1),
+            sr_batch_output_mb=round(self._bytes_to_mb(sr_batch_bytes), 1),
+            cpu_accumulator_mb=round(self._bytes_to_mb(cpu_acc_bytes), 1),
         )
 
     # ----------------------------------------------------------
@@ -471,7 +491,7 @@ class SARInferencer:
         # ── generate patch coordinates ──
         coords = self._get_patch_coords(padded_h, padded_w)
         total_patches = len(coords)
-        logger.info(f"  Total patches: {total_patches}")
+        emit_infer_log(logging.DEBUG, "Generated inference patches", label=label, total_patches=total_patches)
 
         sr_patch_size = self.patch_size * 2
         blend_win = self.blend_window  # (sr_patch_size, sr_patch_size)
@@ -481,11 +501,7 @@ class SARInferencer:
 
         # ── batch inference ──
         first_batch_logged = False
-        for batch_start in tqdm(
-            range(0, total_patches, self.batch_size),
-            desc="  Inferring",
-            leave=False,
-        ):
+        for batch_start in range(0, total_patches, self.batch_size):
             batch_coords = coords[batch_start : batch_start + self.batch_size]
             batch_t1: List[torch.Tensor] = []
             batch_t2: List[torch.Tensor] = []
@@ -505,11 +521,13 @@ class SARInferencer:
             inp_t1 = torch.cat(batch_t1, dim=0).to(self.device)
             inp_t2 = torch.cat(batch_t2, dim=0).to(self.device)
             if not first_batch_logged:
-                logger.info(
-                    "  First batch tensors | T1=%s | T2=%s | dtype=%s",
-                    tuple(inp_t1.shape),
-                    tuple(inp_t2.shape),
-                    inp_t1.dtype,
+                emit_infer_log(
+                    logging.DEBUG,
+                    "First inference batch tensors",
+                    label=label,
+                    t1_shape=list(inp_t1.shape),
+                    t2_shape=list(inp_t2.shape),
+                    dtype=str(inp_t1.dtype),
                 )
                 self._log_vram(f"{label} after uploading first batch")
 
@@ -579,9 +597,13 @@ class SARInferencer:
             data = src.read().astype(np.float32)  # (bands, H, W)
             meta = src.profile.copy()
             meta["descriptions"] = src.descriptions
-            logger.info(
-                f"  Read: {path.name}  |  shape={data.shape}  |  "
-                f"CRS={src.crs}  |  dtype={src.dtypes[0]}"
+            emit_infer_log(
+                logging.DEBUG,
+                "Read raster",
+                path=path.name,
+                shape=list(data.shape),
+                crs=str(src.crs),
+                dtype=src.dtypes[0],
             )
         return data, meta
 
@@ -602,9 +624,13 @@ class SARInferencer:
             meta["crs"] = src.crs
             meta["width"] = src.width
             meta["height"] = src.height
-            logger.info(
-                f"  Read 1-band: {path.name}  |  shape={data.shape}  |  "
-                f"CRS={src.crs}  |  dtype={src.dtypes[0]}"
+            emit_infer_log(
+                logging.DEBUG,
+                "Read single-band raster",
+                path=path.name,
+                shape=list(data.shape),
+                crs=str(src.crs),
+                dtype=src.dtypes[0],
             )
         return data, meta
 
@@ -681,8 +707,14 @@ class SARInferencer:
                 dst_nodata=dst_nodata,
                 resampling=resampling,
             )
-            logger.info(
-                f"  Aligned: {path.name} -> {ref_width}x{ref_height} on {ref_crs} using {resampling.name}"
+            emit_infer_log(
+                logging.DEBUG,
+                "Aligned raster to reference grid",
+                path=path.name,
+                width=ref_width,
+                height=ref_height,
+                crs=str(ref_crs),
+                resampling=resampling.name,
             )
             return destination
 
@@ -766,13 +798,14 @@ class SARInferencer:
             reference_meta["transform"] = transform
             reference_meta["width"] = width
             reference_meta["height"] = height
-            logger.info(
-                "  Canonical grid override: CRS=%s, res=(%.6f, %.6f), size=%dx%d",
-                target_crs,
-                xres,
-                yres,
-                width,
-                height,
+            emit_infer_log(
+                logging.DEBUG,
+                "Canonical grid override",
+                crs=str(target_crs),
+                xres=round(float(xres), 6),
+                yres=round(float(yres), 6),
+                width=width,
+                height=height,
             )
             return reference_meta
 
@@ -842,18 +875,19 @@ class SARInferencer:
 
     def _log_input_semantics(self, identifier: str, semantics: Dict[str, Any]) -> None:
         """Emit a clear, one-place log of temporal semantics for the current inference pair."""
-        logger.info(
-            "  Input semantics | Pair=%s | %s=%s | %s=%s | matches_training=%s",
-            identifier,
-            semantics.get("t1_label", "T1"),
-            semantics.get("t1_role"),
-            semantics.get("t2_label", "T2"),
-            semantics.get("t2_role"),
-            semantics.get("matches_training_semantics"),
+        emit_infer_log(
+            logging.DEBUG,
+            "Input semantics",
+            pair=identifier,
+            t1_label=semantics.get("t1_label", "T1"),
+            t1_role=semantics.get("t1_role"),
+            t2_label=semantics.get("t2_label", "T2"),
+            t2_role=semantics.get("t2_role"),
+            matches_training=semantics.get("matches_training_semantics"),
         )
         note = semantics.get("note")
         if note:
-            logger.info("  Semantics note: %s", note)
+            emit_infer_log(logging.DEBUG, "Input semantics note", pair=identifier, note=note)
         if not bool(semantics.get("matches_training_semantics", True)):
             logger.warning(
                 "  Pair '%s' does not follow the canonical training semantics. "
@@ -903,8 +937,15 @@ class SARInferencer:
 
         n_bands_t1, orig_h, orig_w = data_t1.shape
         n_bands_t2 = data_t2.shape[0]
-        logger.info(f"  Image size: {orig_w}x{orig_h}, T1 bands={n_bands_t1}, T2 bands={n_bands_t2}")
-        self._log_vram("Before pair inference")
+        emit_infer_log(
+            logging.INFO,
+            "Starting pair inference",
+            identifier=identifier,
+            width=orig_w,
+            height=orig_h,
+            t1_band_count=n_bands_t1,
+            t2_band_count=n_bands_t2,
+        )
 
         vv_idx_t1 = self._find_band_idx(meta_t1, n_bands_t1, "VV", 0, Path(f"{identifier}_t1.tif"))
         vh_idx_t1 = self._find_band_idx(meta_t1, n_bands_t1, "VH", 1, Path(f"{identifier}_t1.tif"))
@@ -923,9 +964,7 @@ class SARInferencer:
         out_descs = []
 
         if has_vv:
-            logger.info("=" * 60)
-            logger.info("Step 2/5 - Inference: VV polarisation")
-            logger.info("=" * 60)
+            emit_infer_log(logging.INFO, "Running band inference", identifier=identifier, band="VV")
             vv_t1 = data_t1[vv_idx_t1]
             vv_t2 = data_t2[vv_idx_t2]
             vv_t1_norm = self.normalize_db(vv_t1)
@@ -936,16 +975,21 @@ class SARInferencer:
             sr_vv = self._infer_band(self.model_vv, vv_t1_norm, vv_t2_norm, label="VV")
             self._log_vram("After VV Inference", baseline=vv_baseline)
             sr_vv_db = self.denormalize_db(sr_vv)
-            logger.info(f"  VV SR dB range: [{sr_vv_db.min():.2f}, {sr_vv_db.max():.2f}]")
+            emit_infer_log(
+                logging.DEBUG,
+                "Band inference output range",
+                identifier=identifier,
+                band="VV",
+                min_db=round(float(sr_vv_db.min()), 2),
+                max_db=round(float(sr_vv_db.max()), 2),
+            )
             out_bands.append(sr_vv_db)
             out_descs.append("SR_VV")
         else:
-            logger.info("  [-] Skipping VV inference (band missing from one or both inputs)")
+            emit_infer_log(logging.WARNING, "Skipping band inference", identifier=identifier, band="VV", reason="band_missing")
 
         if has_vh:
-            logger.info("=" * 60)
-            logger.info("Step 3/5 - Inference: VH polarisation")
-            logger.info("=" * 60)
+            emit_infer_log(logging.INFO, "Running band inference", identifier=identifier, band="VH")
             vh_t1 = data_t1[vh_idx_t1]
             vh_t2 = data_t2[vh_idx_t2]
             vh_t1_norm = self.normalize_db(vh_t1)
@@ -956,11 +1000,18 @@ class SARInferencer:
             sr_vh = self._infer_band(self.model_vh, vh_t1_norm, vh_t2_norm, label="VH")
             self._log_vram("After VH Inference", baseline=vh_baseline)
             sr_vh_db = self.denormalize_db(sr_vh)
-            logger.info(f"  VH SR dB range: [{sr_vh_db.min():.2f}, {sr_vh_db.max():.2f}]")
+            emit_infer_log(
+                logging.DEBUG,
+                "Band inference output range",
+                identifier=identifier,
+                band="VH",
+                min_db=round(float(sr_vh_db.min()), 2),
+                max_db=round(float(sr_vh_db.max()), 2),
+            )
             out_bands.append(sr_vh_db)
             out_descs.append("SR_VH")
         else:
-            logger.info("  [-] Skipping VH inference (band missing from one or both inputs)")
+            emit_infer_log(logging.WARNING, "Skipping band inference", identifier=identifier, band="VH", reason="band_missing")
 
         sr_output = np.stack(out_bands, axis=0)
         src_transform: Affine = meta_t1["transform"]
@@ -989,8 +1040,14 @@ class SARInferencer:
             blockysize=cfg_out.get("blockysize", 256),
         )
         self._log_vram("After writing output")
-        logger.info(
-            f"  ✓ Output: {out_path} ({sr_output.shape[2]}x{sr_output.shape[1]}, {sr_output.shape[0]} bands)"
+        emit_infer_log(
+            logging.INFO,
+            "Completed pair inference",
+            identifier=identifier,
+            output_path=str(out_path),
+            width=int(sr_output.shape[2]),
+            height=int(sr_output.shape[1]),
+            band_count=int(sr_output.shape[0]),
         )
         return out_path
 
@@ -1049,7 +1106,7 @@ class SARInferencer:
                     if b < len(descs) and descs[b]:
                         dst.set_band_description(b + 1, descs[b])
 
-        logger.info(f"  ✓ Saved: {path}  |  shape=({bands}, {h}, {w})")
+        emit_infer_log(logging.DEBUG, "Saved GeoTIFF", path=str(path), band_count=bands, height=h, width=w)
 
     # ----------------------------------------------------------
     #  Directory Scanning
@@ -1305,6 +1362,9 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_yaml(args.config)
+    env_overrides = apply_inference_env_overrides(config)
+    if env_overrides:
+        config.setdefault("_runtime", {})["env_overrides"] = env_overrides
     
     if args.out_name:
         if "output" not in config:
