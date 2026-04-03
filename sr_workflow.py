@@ -4,6 +4,8 @@ import argparse
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -259,6 +261,280 @@ def collect_publishable_item_json_paths(summary: Mapping[str, Any]) -> List[Path
     return unique_paths
 
 
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def resolve_save_debug_artifacts_for_summary(summary: Mapping[str, Any]) -> Optional[bool]:
+    candidates: List[Any] = []
+
+    resolved_config = summary.get("resolved_config") if isinstance(summary, Mapping) else None
+    if isinstance(resolved_config, Mapping):
+        output_cfg = resolved_config.get("output")
+        if isinstance(output_cfg, Mapping):
+            candidates.append(output_cfg.get("save_debug_artifacts"))
+
+    run_config = summary.get("run_config") if isinstance(summary, Mapping) else None
+    if isinstance(run_config, Mapping):
+        candidates.append(run_config.get("save_debug_artifacts"))
+
+    for aoi in list(summary.get("aois") or []):
+        for period in list((aoi.get("periods") or [])):
+            period_run_config = period.get("run_config")
+            if isinstance(period_run_config, Mapping):
+                candidates.append(period_run_config.get("save_debug_artifacts"))
+
+    for candidate in candidates:
+        parsed = _coerce_optional_bool(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _safe_cleanup_fragment(text: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text or "").strip())
+    return normalized or "artifact"
+
+
+def _build_cleanup_report(
+    *,
+    requested: bool,
+    status: str,
+    save_debug_artifacts: Optional[bool],
+    policy: str,
+    skipped_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    report: Dict[str, Any] = {
+        "requested": bool(requested),
+        "status": status,
+        "policy": policy,
+        "save_debug_artifacts": save_debug_artifacts,
+        "deleted_file_count": 0,
+        "deleted_roles": [],
+        "deleted_paths": [],
+        "pruned_dirs": [],
+        "bytes_freed": 0,
+        "warnings": [],
+    }
+    if skipped_reason:
+        report["skipped_reason"] = skipped_reason
+    return report
+
+
+def _prune_empty_dirs(start_dir: Optional[Path], *, stop_at: Path) -> List[str]:
+    if start_dir is None:
+        return []
+    removed: List[str] = []
+    stop_at_resolved = stop_at.resolve()
+    current = start_dir
+    while True:
+        try:
+            current_resolved = current.resolve()
+        except Exception:
+            break
+        if current_resolved == stop_at_resolved:
+            break
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        removed.append(str(current_resolved))
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return removed
+
+
+def _path_tree_stats(path: Path) -> Tuple[int, int]:
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    if not resolved.exists():
+        return 0, 0
+    if resolved.is_file():
+        return 1, int(resolved.stat().st_size)
+    if not resolved.is_dir():
+        return 0, 0
+    file_count = 0
+    total_bytes = 0
+    for child in resolved.rglob("*"):
+        try:
+            if child.is_file():
+                file_count += 1
+                total_bytes += int(child.stat().st_size)
+        except Exception:
+            continue
+    return file_count, total_bytes
+
+
+def cleanup_published_local_artifacts(
+    *,
+    plan: Any,
+    job_dir: Path,
+) -> Dict[str, Any]:
+    cleanup = _build_cleanup_report(
+        requested=True,
+        status="ok",
+        save_debug_artifacts=False,
+        policy="cleanup_after_publish_success",
+    )
+
+    job_dir_resolved = job_dir.resolve()
+    item_json_path = Path(str(getattr(plan, "item_json_path"))).resolve()
+    output_dir = item_json_path.parent
+    period_dir = output_dir.parent
+    if not _path_within(output_dir, job_dir_resolved) or not _path_within(period_dir, job_dir_resolved):
+        cleanup["status"] = "warning"
+        cleanup["skipped_reason"] = "unsafe_output_dir_outside_job_dir"
+        cleanup["warnings"].append("Output directory is outside the workflow job directory; skipping cleanup.")
+        return cleanup
+
+    trash_root = period_dir / ".cleanup_trash" / _safe_cleanup_fragment(getattr(plan, "item_id", item_json_path.stem))
+    cleanup["trash_dir"] = str(trash_root)
+    moved: List[Tuple[str, Path, int, Path]] = []
+
+    for artifact in list(getattr(plan, "artifacts", []) or []):
+        role = str(getattr(artifact, "role", "") or "").strip()
+        if role not in {"sr_vv", "sr_vh", "item_json"}:
+            continue
+        local_path = Path(str(getattr(artifact, "local_path"))).resolve()
+        if not local_path.exists():
+            cleanup["warnings"].append(f"Skipping cleanup for {role}: local artifact does not exist.")
+            continue
+        if local_path.is_symlink():
+            cleanup["warnings"].append(f"Skipping cleanup for {role}: symlink paths are not allowed.")
+            continue
+        if not local_path.is_file():
+            cleanup["warnings"].append(f"Skipping cleanup for {role}: expected a regular file.")
+            continue
+        if local_path.parent != output_dir:
+            cleanup["warnings"].append(f"Skipping cleanup for {role}: artifact is not located under the output directory.")
+            continue
+        if not _path_within(local_path, job_dir_resolved):
+            cleanup["warnings"].append(f"Skipping cleanup for {role}: artifact is outside the workflow job directory.")
+            continue
+
+        trash_root.mkdir(parents=True, exist_ok=True)
+        trash_path = trash_root / f"{role}__{local_path.name}"
+        try:
+            size_bytes = local_path.stat().st_size
+            local_path.replace(trash_path)
+            moved.append((role, trash_path, size_bytes, local_path))
+        except Exception as exc:
+            cleanup["warnings"].append(f"Failed to move {role} into cleanup trash: {exc}")
+
+    for role, trash_path, size_bytes, original_path in moved:
+        try:
+            trash_path.unlink()
+            cleanup["deleted_file_count"] += 1
+            cleanup["bytes_freed"] += int(size_bytes)
+            cleanup["deleted_roles"].append(role)
+            cleanup["deleted_paths"].append(str(original_path))
+        except Exception as exc:
+            cleanup["warnings"].append(f"Failed to delete trashed artifact for {role}: {exc}")
+
+    debug_dir = period_dir / "debug"
+    if debug_dir.exists():
+        if debug_dir.is_symlink():
+            cleanup["warnings"].append("Skipping cleanup for debug_dir: symlink paths are not allowed.")
+        elif not debug_dir.is_dir():
+            cleanup["warnings"].append("Skipping cleanup for debug_dir: expected a directory.")
+        elif not _path_within(debug_dir, job_dir_resolved):
+            cleanup["warnings"].append("Skipping cleanup for debug_dir: directory is outside the workflow job directory.")
+        else:
+            trash_root.mkdir(parents=True, exist_ok=True)
+            trash_debug_dir = trash_root / "debug"
+            try:
+                file_count, size_bytes = _path_tree_stats(debug_dir)
+                debug_dir.replace(trash_debug_dir)
+                shutil.rmtree(trash_debug_dir)
+                cleanup["deleted_file_count"] += int(file_count)
+                cleanup["bytes_freed"] += int(size_bytes)
+                cleanup["deleted_roles"].append("debug_dir")
+                cleanup["deleted_paths"].append(str(debug_dir.resolve()))
+            except Exception as exc:
+                cleanup["warnings"].append(f"Failed to cleanup debug_dir: {exc}")
+
+    cleanup["pruned_dirs"].extend(_prune_empty_dirs(output_dir, stop_at=period_dir))
+    cleanup["pruned_dirs"].extend(_prune_empty_dirs(trash_root, stop_at=period_dir))
+
+    if cleanup["warnings"]:
+        cleanup["status"] = "warning"
+    cleanup["trash_retained"] = trash_root.exists()
+    return cleanup
+
+
+def build_post_publish_cleanup_report(
+    *,
+    summary: Mapping[str, Any],
+    settings: WorkflowSettings,
+    publish_report: Mapping[str, Any],
+    plan: Optional[Any] = None,
+    job_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    save_debug_artifacts = resolve_save_debug_artifacts_for_summary(summary)
+    if not settings.publish_execute:
+        return _build_cleanup_report(
+            requested=False,
+            status="skipped",
+            save_debug_artifacts=save_debug_artifacts,
+            policy="keep_local_outputs",
+            skipped_reason="preflight_mode",
+        )
+    if not bool(publish_report.get("published")):
+        return _build_cleanup_report(
+            requested=False,
+            status="skipped",
+            save_debug_artifacts=save_debug_artifacts,
+            policy="keep_local_outputs",
+            skipped_reason="publish_not_successful",
+        )
+    if save_debug_artifacts is None:
+        return _build_cleanup_report(
+            requested=False,
+            status="skipped",
+            save_debug_artifacts=save_debug_artifacts,
+            policy="keep_local_outputs",
+            skipped_reason="save_debug_artifacts_unknown",
+        )
+    if save_debug_artifacts:
+        return _build_cleanup_report(
+            requested=False,
+            status="skipped",
+            save_debug_artifacts=save_debug_artifacts,
+            policy="keep_local_outputs",
+            skipped_reason="save_debug_artifacts_enabled",
+        )
+    if plan is None or job_dir is None:
+        return _build_cleanup_report(
+            requested=False,
+            status="warning",
+            save_debug_artifacts=save_debug_artifacts,
+            policy="cleanup_after_publish_success",
+            skipped_reason="missing_cleanup_context",
+        )
+    return cleanup_published_local_artifacts(plan=plan, job_dir=job_dir)
+
+
 @contextmanager
 def capture_workflow_job_logs(job_dir: Path):
     log_path = job_dir / "job.log"
@@ -330,13 +606,24 @@ def publish_outputs_for_summary(
 ) -> Tuple[int, Path]:
     summary_path = Path(str(summary.get("summary_json") or job_dir / "summary.json"))
     item_json_paths = collect_publishable_item_json_paths(summary)
+    save_debug_artifacts = resolve_save_debug_artifacts_for_summary(summary)
+    publish_settings = settings.to_dict()
+    publish_settings["save_debug_artifacts"] = save_debug_artifacts
+    publish_settings["cleanup_after_publish_success"] = (save_debug_artifacts is False)
     workflow_report: Dict[str, Any] = {
         "status": "ok",
         "job_dir": str(job_dir),
         "summary_json": str(summary_path),
-        "publish_settings": settings.to_dict(),
+        "publish_settings": publish_settings,
         "publishable_item_count": len(item_json_paths),
         "results": [],
+        "cleanup_summary": {
+            "deleted_file_count": 0,
+            "bytes_freed": 0,
+            "cleaned_item_count": 0,
+            "warning_item_count": 0,
+            "skipped_item_count": 0,
+        },
     }
     summary["workflow_publish"] = workflow_report
 
@@ -372,6 +659,8 @@ def publish_outputs_for_summary(
             publish_overwrite=settings.publish_overwrite,
             publish_timeout_seconds=settings.publish_timeout_seconds,
             publish_continue_on_error=settings.publish_continue_on_error,
+            save_debug_artifacts=save_debug_artifacts,
+            cleanup_after_publish_success=(save_debug_artifacts is False),
         )
         for item_json_path in item_json_paths:
             try:
@@ -403,6 +692,13 @@ def publish_outputs_for_summary(
                     )
                     publish_report["published"] = False
                     publish_report["status"] = "ok"
+                cleanup_report = build_post_publish_cleanup_report(
+                    summary=summary,
+                    settings=settings,
+                    publish_report=publish_report,
+                    plan=plan,
+                    job_dir=job_dir,
+                )
                 result_entry = {
                     "item_json_path": str(item_json_path),
                     "item_id": plan.item_id,
@@ -410,8 +706,19 @@ def publish_outputs_for_summary(
                     "status": "ok",
                     "published": bool(publish_report.get("published")),
                     "mode": "execute" if settings.publish_execute else "preflight",
+                    "cleanup": cleanup_report,
                 }
                 workflow_report["results"].append(result_entry)
+                cleanup_summary = workflow_report["cleanup_summary"]
+                cleanup_summary["deleted_file_count"] += int(cleanup_report.get("deleted_file_count") or 0)
+                cleanup_summary["bytes_freed"] += int(cleanup_report.get("bytes_freed") or 0)
+                if cleanup_report.get("requested"):
+                    if cleanup_report.get("status") == "ok":
+                        cleanup_summary["cleaned_item_count"] += 1
+                    else:
+                        cleanup_summary["warning_item_count"] += 1
+                else:
+                    cleanup_summary["skipped_item_count"] += 1
                 attach_period_publish_result(
                     summary,
                     item_json_path=item_json_path,
@@ -430,16 +737,42 @@ def publish_outputs_for_summary(
                     item_id=plan.item_id,
                     published=bool(publish_report.get("published")),
                 )
+                if cleanup_report.get("requested"):
+                    emit_workflow_log(
+                        logging.INFO if cleanup_report.get("status") == "ok" else logging.WARNING,
+                        "Post-publish cleanup processed for item",
+                        item_id=plan.item_id,
+                        cleanup_status=cleanup_report.get("status"),
+                        deleted_file_count=cleanup_report.get("deleted_file_count"),
+                        bytes_freed=cleanup_report.get("bytes_freed"),
+                        warnings=len(cleanup_report.get("warnings") or []),
+                    )
+                else:
+                    emit_workflow_log(
+                        logging.INFO,
+                        "Post-publish cleanup skipped for item",
+                        item_id=plan.item_id,
+                        skipped_reason=cleanup_report.get("skipped_reason"),
+                    )
             except Exception as exc:
                 failed_count += 1
+                cleanup_report = _build_cleanup_report(
+                    requested=False,
+                    status="skipped",
+                    save_debug_artifacts=save_debug_artifacts,
+                    policy="keep_local_outputs",
+                    skipped_reason="publish_not_successful",
+                )
                 result_entry = {
                     "item_json_path": str(item_json_path),
                     "status": "error",
                     "published": False,
                     "mode": "execute" if settings.publish_execute else "preflight",
                     "error": str(exc),
+                    "cleanup": cleanup_report,
                 }
                 workflow_report["results"].append(result_entry)
+                workflow_report["cleanup_summary"]["skipped_item_count"] += 1
                 attach_period_publish_result(
                     summary,
                     item_json_path=item_json_path,
