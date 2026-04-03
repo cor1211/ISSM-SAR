@@ -49,6 +49,8 @@ pip install -r requirements_gee.txt
 Example for one DB AOI and one month:
 
 ```bash
+cp .env.example .env
+
 python sar_pipeline.py \
   --config config/pipeline_config_stac_runtime.yaml \
   --db-aoi-id <AOI_UUID> \
