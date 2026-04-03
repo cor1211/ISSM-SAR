@@ -1,0 +1,8 @@
+# Optional legacy GEE dependencies.
+#
+# Install this only if you still need:
+# - gee_trainlike_composite mode
+# - gee_compare_download.py / gee_trainlike_download.py
+# - GEE-based benchmark / analysis helpers
+
+earthengine-api==1.6.15

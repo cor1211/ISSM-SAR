@@ -1,18 +1,13 @@
-# ISSM-SAR local runtime dependencies
+# Local STAC runtime dependencies (non-Docker).
 #
-# Use this file when running the repo on a normal machine, not via Docker.
-# It extends the Docker STAC runtime set with packages that the container gets
-# from its base image or that are needed by the default local workflow.
+# This is the recommended install set when running the STAC pipeline directly
+# on a normal machine. It intentionally excludes legacy GEE dependencies.
 #
-# Notes:
-# - The Docker image already provides `torch` from the base PyTorch image.
-# - The default `config/pipeline_config.yaml` uses `gee_trainlike_composite`,
-#   so `earthengine-api` is included here for local parity.
+# Optional legacy GEE add-on:
+#   pip install -r requirements_gee.txt
 
 -r requirements_runtime_stac.txt
 
-# Needed explicitly on a plain machine.
+# Needed explicitly on a plain machine. The Docker image gets torch from the
+# PyTorch base image instead of this file.
 torch==2.8.0
-
-# Needed for the default GEE workflow outside Docker.
-earthengine-api==1.6.15

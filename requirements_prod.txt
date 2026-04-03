@@ -1,8 +1,6 @@
-# Compatibility alias for the standard local non-container runtime set.
+# Backward-compatible alias for the standard local STAC runtime.
 #
-# Prefer:
-#   pip install -r requirements_runtime_local.txt
-#
-# This file is kept so existing setup scripts using `requirements_prod.txt`
-# still install the correct runtime dependencies.
+# Historical setup scripts may still install `requirements_prod.txt`.
+# Keep this file as a thin alias so those commands continue to work.
+
 -r requirements_runtime_local.txt
