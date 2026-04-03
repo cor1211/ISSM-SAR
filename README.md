@@ -1,35 +1,33 @@
 # ISSM-SAR
 
-STAC-first runtime for Sentinel-1 monthly SAR super-resolution.
+Runtime STAC-first để tạo sản phẩm SAR Super-Resolution theo tháng từ dữ liệu Sentinel-1.
 
-Current recommended focus:
-- `STAC + S3` input
-- local output packaging
-- optional publish to STAC/S3 target
-- Docker runtime for server execution
+Phạm vi khuyến nghị hiện tại:
+- đầu vào `STAC + S3`
+- chạy pipeline cục bộ hoặc bằng Docker
+- đóng gói output local
+- tùy chọn publish lên STAC/S3 đích
 
-Legacy GEE helpers still exist in the repo, but they are now treated as
-optional and are no longer part of the default local/runtime dependency path.
+Các helper GEE cũ vẫn còn trong repo, nhưng không còn nằm trong đường cài đặt mặc định nữa.
 
-## 📘 Dependency Files
+## 📘 Các File Requirements
 
-Use the smallest file that matches your use case:
+Chọn file nhỏ nhất đúng với nhu cầu của bạn:
 
 - `requirements_runtime_stac.txt`
-  - canonical STAC runtime base
-  - used by the Docker image
+  - bộ dependency runtime STAC chuẩn
+  - Docker đang dùng file này
 - `requirements_runtime_local.txt`
-  - recommended local install for STAC runtime outside Docker
-  - `requirements_runtime_stac.txt` + `torch`
+  - bộ dependency khuyến nghị khi chạy local ngoài Docker
+  - gồm `requirements_runtime_stac.txt` + `torch`
 - `requirements_gee.txt`
-  - optional add-on only for legacy GEE workflows/tools
+  - dependency tùy chọn cho các tool/flow GEE cũ
 - `requirements.txt`
-  - broader local development environment
-  - includes local runtime + training/evaluation/notebook extras
+  - bộ local rộng hơn cho train / eval / dev
 
-## ⚙️ Local Run
+## ⚙️ Chạy Local
 
-### 1. Create Environment
+### 1. Tạo môi trường
 
 ```bash
 python -m venv .venv
@@ -38,28 +36,38 @@ pip install --upgrade pip
 pip install -r requirements_runtime_local.txt
 ```
 
-If you still need legacy GEE tooling:
+Nếu vẫn cần các tool GEE cũ:
 
 ```bash
 pip install -r requirements_gee.txt
 ```
 
-### 2. Run Pipeline Locally
-
-Example for one DB AOI and one month:
+### 2. Chuẩn bị `.env`
 
 ```bash
 cp .env.example .env
+```
 
+Sau đó điền các giá trị cần thiết trong `.env`:
+- STAC source
+- S3 source
+- DB nếu chạy bằng `--db-aoi-id`
+- target publish nếu cần publish
+
+### 3. Chạy pipeline local
+
+Ví dụ chạy một AOI từ database:
+
+```bash
 python sar_pipeline.py \
   --config config/pipeline_config_stac_runtime.yaml \
   --db-aoi-id <AOI_UUID> \
   --target-month 2026-01
 ```
 
-### 3. Publish Locally
+### 4. Publish local
 
-Preflight only:
+Preflight:
 
 ```bash
 python sr_publish.py \
@@ -74,21 +82,20 @@ python sr_publish.py \
   --execute
 ```
 
-Notes:
-- Local nên ưu tiên:
-  - `sar_pipeline.py` để chạy pipeline
-  - `sr_publish.py` để preflight hoặc publish
-- `sr_workflow.py` phù hợp hơn với Docker/container mode.
+Gợi ý dùng local:
+- dùng `sar_pipeline.py` để chạy pipeline
+- dùng `sr_publish.py` để preflight hoặc publish
+- `sr_workflow.py` phù hợp hơn với container mode
 
-## 🚀 Docker Run
+## 🚀 Chạy Docker
 
-### 1. Build Image
+### 1. Build image
 
 ```bash
 docker build -t issm-sar-stac-runtime:local .
 ```
 
-### 2. Run Pipeline In Container
+### 2. Chạy pipeline trong container
 
 ```bash
 docker run --rm -it \
@@ -104,7 +111,7 @@ docker run --rm -it \
   --target-month 2026-01
 ```
 
-### 3. Run One-Shot Workflow In Container
+### 3. Chạy one-shot workflow trong container
 
 ```bash
 docker run --rm -it \
@@ -120,7 +127,7 @@ docker run --rm -it \
   --target-month 2026-01
 ```
 
-Useful publish toggles:
+Các cờ publish hay dùng trong `.env`:
 
 ```env
 WORKFLOW_PUBLISH_ENABLED=false
@@ -128,27 +135,26 @@ WORKFLOW_PUBLISH_EXECUTE=false
 WORKFLOW_PUBLISH_OVERWRITE=false
 ```
 
-Recommended safe progression:
+Thứ tự an toàn nên đi:
 1. `WORKFLOW_PUBLISH_ENABLED=false`
-2. `WORKFLOW_PUBLISH_ENABLED=true` and `WORKFLOW_PUBLISH_EXECUTE=false`
-3. `WORKFLOW_PUBLISH_ENABLED=true` and `WORKFLOW_PUBLISH_EXECUTE=true`
+2. `WORKFLOW_PUBLISH_ENABLED=true` và `WORKFLOW_PUBLISH_EXECUTE=false`
+3. `WORKFLOW_PUBLISH_ENABLED=true` và `WORKFLOW_PUBLISH_EXECUTE=true`
 
-## 📚 Main Files
+## 📚 File Chính
 
 - `sar_pipeline.py`
-  - main runtime pipeline
+  - pipeline runtime chính
 - `sr_workflow.py`
-  - one-shot pipeline then publish wrapper
+  - wrapper one-shot `pipeline -> publish`
 - `sr_publish.py`
-  - publish contract and preflight checks
+  - preflight và publish contract
 - `config/pipeline_config_stac_runtime.yaml`
-  - runtime STAC pipeline config
+  - config runtime STAC mặc định
 - `.env`
-  - runtime connection + tuning overrides
+  - cấu hình kết nối và tuning runtime
 
-## 📝 Notes
+## 📝 Ghi Chú
 
-- Docker runtime currently installs only `requirements_runtime_stac.txt`.
-- Local STAC runtime should use `requirements_runtime_local.txt`.
-- Legacy GEE code is still present in the repo, but no longer belongs to the
-  default dependency path.
+- Docker hiện chỉ cài `requirements_runtime_stac.txt`
+- chạy local theo hướng STAC nên dùng `requirements_runtime_local.txt`
+- code GEE cũ vẫn còn trong repo, nhưng không còn là đường mặc định
