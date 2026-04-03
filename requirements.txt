@@ -24,6 +24,8 @@ wandb
 matplotlib==3.9.4
 opencv-python==4.12.0.88
 pandas==2.3.3
+Pillow==11.3.0
+rich==13.9.4
 scikit-image==0.24.0
 seaborn==0.13.2
 

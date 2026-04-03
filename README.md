@@ -29,6 +29,18 @@ Chọn file nhỏ nhất đúng với nhu cầu của bạn:
 
 ### 1. Tạo môi trường
 
+Khuyến nghị dùng `conda` để tạo môi trường, sau đó cài dependency bằng `pip`
+đúng theo file requirements của repo:
+
+```bash
+conda create -n issm-sar python=3.11 pip -y
+conda activate issm-sar
+pip install --upgrade pip
+pip install -r requirements_runtime_local.txt
+```
+
+Nếu bạn thích `venv`, vẫn có thể dùng:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -40,6 +52,12 @@ Nếu vẫn cần các tool GEE cũ:
 
 ```bash
 pip install -r requirements_gee.txt
+```
+
+Nếu bạn cần cả training / eval / notebook:
+
+```bash
+pip install -r requirements.txt
 ```
 
 ### 2. Chuẩn bị `.env`
