@@ -1,6 +1,0 @@
-# Backward-compatible alias for the standard local STAC runtime.
-#
-# Historical setup scripts may still install `requirements_prod.txt`.
-# Keep this file as a thin alias so those commands continue to work.
-
--r requirements_runtime_local.txt

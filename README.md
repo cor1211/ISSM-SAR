@@ -11,7 +11,7 @@ Current recommended focus:
 Legacy GEE helpers still exist in the repo, but they are now treated as
 optional and are no longer part of the default local/runtime dependency path.
 
-## Dependency files
+## 📘 Dependency Files
 
 Use the smallest file that matches your use case:
 
@@ -26,12 +26,10 @@ Use the smallest file that matches your use case:
 - `requirements.txt`
   - broader local development environment
   - includes local runtime + training/evaluation/notebook extras
-- `requirements_prod.txt`
-  - compatibility alias to `requirements_runtime_local.txt`
 
-## Local run
+## ⚙️ Local Run
 
-### 1. Create environment
+### 1. Create Environment
 
 ```bash
 python -m venv .venv
@@ -46,40 +44,7 @@ If you still need legacy GEE tooling:
 pip install -r requirements_gee.txt
 ```
 
-### 2. Prepare environment variables
-
-The pipeline reads runtime settings from `.env`.
-
-Minimum STAC/S3 source settings:
-
-```env
-STAC_API_URL=
-S3_ENDPOINT=
-S3_ACCESS_KEY=
-S3_SECRET_KEY=
-```
-
-If you want publish target overrides, set:
-
-```env
-SR_S3_BUCKET=
-SR_S3_PREFIX_MONTHLY=
-SR_COLLECTION_ID_MONTHLY=
-SR_S3_ENDPOINT=
-SR_S3_ACCESS_KEY=
-SR_S3_SECRET_KEY=
-SR_STAC_ROOT_URL=
-```
-
-If the `SR_* endpoint/credential/root-url` values are blank, target publish can
-fall back to the source connection settings. The target identity keys should
-still be set explicitly:
-
-- `SR_S3_BUCKET`
-- `SR_S3_PREFIX_MONTHLY`
-- `SR_COLLECTION_ID_MONTHLY`
-
-### 3. Run pipeline locally
+### 2. Run Pipeline Locally
 
 Example for one DB AOI and one month:
 
@@ -90,22 +55,38 @@ python sar_pipeline.py \
   --target-month 2026-01
 ```
 
-This is the recommended local entry point.
+### 3. Publish Locally
+
+Preflight only:
+
+```bash
+python sr_publish.py \
+  --item-json /abs/path/to/output/<ITEM_ID>.json
+```
+
+Publish thật:
+
+```bash
+python sr_publish.py \
+  --item-json /abs/path/to/output/<ITEM_ID>.json \
+  --execute
+```
 
 Notes:
-- `sar_pipeline.py` runs cleanly on a normal machine with the local STAC requirements.
-- `sr_workflow.py` is primarily intended for the container layout (`/app/...`) and is
-  best used through Docker unless you deliberately mirror that layout locally.
+- Local nên ưu tiên:
+  - `sar_pipeline.py` để chạy pipeline
+  - `sr_publish.py` để preflight hoặc publish
+- `sr_workflow.py` phù hợp hơn với Docker/container mode.
 
-## Docker run
+## 🚀 Docker Run
 
-### 1. Build image
+### 1. Build Image
 
 ```bash
 docker build -t issm-sar-stac-runtime:local .
 ```
 
-### 2. Run pipeline in container
+### 2. Run Pipeline In Container
 
 ```bash
 docker run --rm -it \
@@ -121,7 +102,7 @@ docker run --rm -it \
   --target-month 2026-01
 ```
 
-### 3. Run one-shot workflow in container
+### 3. Run One-Shot Workflow In Container
 
 ```bash
 docker run --rm -it \
@@ -137,7 +118,7 @@ docker run --rm -it \
   --target-month 2026-01
 ```
 
-Useful publish toggles in `.env`:
+Useful publish toggles:
 
 ```env
 WORKFLOW_PUBLISH_ENABLED=false
@@ -150,7 +131,7 @@ Recommended safe progression:
 2. `WORKFLOW_PUBLISH_ENABLED=true` and `WORKFLOW_PUBLISH_EXECUTE=false`
 3. `WORKFLOW_PUBLISH_ENABLED=true` and `WORKFLOW_PUBLISH_EXECUTE=true`
 
-## Recommended files to keep in mind
+## 📚 Main Files
 
 - `sar_pipeline.py`
   - main runtime pipeline
@@ -163,7 +144,7 @@ Recommended safe progression:
 - `.env`
   - runtime connection + tuning overrides
 
-## Notes
+## 📝 Notes
 
 - Docker runtime currently installs only `requirements_runtime_stac.txt`.
 - Local STAC runtime should use `requirements_runtime_local.txt`.
