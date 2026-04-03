@@ -474,8 +474,9 @@ def cleanup_published_local_artifacts(
             except Exception as exc:
                 cleanup["warnings"].append(f"Failed to cleanup debug_dir: {exc}")
 
-    cleanup["pruned_dirs"].extend(_prune_empty_dirs(output_dir, stop_at=period_dir))
-    cleanup["pruned_dirs"].extend(_prune_empty_dirs(trash_root, stop_at=period_dir))
+    cleanup["pruned_dirs"].extend(_prune_empty_dirs(output_dir, stop_at=job_dir_resolved))
+    cleanup["pruned_dirs"].extend(_prune_empty_dirs(trash_root, stop_at=job_dir_resolved))
+    cleanup["pruned_dirs"].extend(_prune_empty_dirs(period_dir, stop_at=job_dir_resolved))
 
     if cleanup["warnings"]:
         cleanup["status"] = "warning"
@@ -609,7 +610,9 @@ def publish_outputs_for_summary(
     save_debug_artifacts = resolve_save_debug_artifacts_for_summary(summary)
     publish_settings = settings.to_dict()
     publish_settings["save_debug_artifacts"] = save_debug_artifacts
-    publish_settings["cleanup_after_publish_success"] = (save_debug_artifacts is False)
+    publish_settings["cleanup_after_publish_success"] = bool(
+        settings.publish_enabled and settings.publish_execute and save_debug_artifacts is False
+    )
     workflow_report: Dict[str, Any] = {
         "status": "ok",
         "job_dir": str(job_dir),
@@ -660,7 +663,9 @@ def publish_outputs_for_summary(
             publish_timeout_seconds=settings.publish_timeout_seconds,
             publish_continue_on_error=settings.publish_continue_on_error,
             save_debug_artifacts=save_debug_artifacts,
-            cleanup_after_publish_success=(save_debug_artifacts is False),
+            cleanup_after_publish_success=bool(
+                settings.publish_enabled and settings.publish_execute and save_debug_artifacts is False
+            ),
         )
         for item_json_path in item_json_paths:
             try:

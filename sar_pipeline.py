@@ -3471,11 +3471,7 @@ def run_exact_pair_pipeline(config: Dict[str, Any], geojson_path: str, output_ro
     inferencer = SARInferencer(infer_config)
     with tempfile.TemporaryDirectory(prefix="sr_exact_pair_") as transient_dir:
         transient_root = Path(transient_dir)
-        raw_dir = resolve_optional_debug_dir(
-            persist=save_debug_artifacts,
-            persistent_path=inputs_dir(run_dir) / dl_cfg.get("raw_dir_name", "raw"),
-            transient_path=transient_root / dl_cfg.get("raw_dir_name", "raw"),
-        )
+        raw_dir = ensure_dir(inputs_dir(run_dir) / dl_cfg.get("raw_dir_name", "raw"))
         downloaded_paths = download_manifest_pair(
             manifest=manifest,
             required_pols=required_pols,
@@ -3531,7 +3527,7 @@ def run_exact_pair_pipeline(config: Dict[str, Any], geojson_path: str, output_ro
         "workflow_mode": "exact_pair",
         "aoi_geojson": resolve_aoi_source_ref(config, aoi_path),
         "run_dir": str(run_dir),
-        "raw_dir": (str(raw_dir) if save_debug_artifacts else None),
+        "raw_dir": str(raw_dir),
         "staging_dir": str(staging_dir if cache_enabled else ""),
         "output_tif": None,
         "output_sr_vv_tif": packaged_outputs["output_sr_vv_tif"],
@@ -3542,7 +3538,7 @@ def run_exact_pair_pipeline(config: Dict[str, Any], geojson_path: str, output_ro
         "selected_pair": selected_pair_info,
         "inference_input_semantics": exact_pair_semantics(),
         "manifest_path": str(manifest_path),
-        "downloaded_files": ([str(p) for p in downloaded_paths] if save_debug_artifacts else None),
+        "downloaded_files": [str(p) for p in downloaded_paths],
         "items_after_hard_filter": len(items),
         "run_config": {
             "stac_url": stac_cfg.get("url", DEFAULT_STAC_API),
@@ -3953,26 +3949,16 @@ def run_stac_representative_calendar_pipeline(
             parent_source_t2_items: List[Dict[str, Any]] = []
             with tempfile.TemporaryDirectory(prefix=f"sr_components_{period['period_id']}_") as transient_dir:
                 transient_root = Path(transient_dir)
-                if save_debug_artifacts:
-                    component_inputs_root = ensure_dir(inputs_dir(period_dir) / "components")
-                    component_intermediate_root = ensure_dir(intermediate_dir(period_dir) / "components")
-                    emit_pipeline_log(
-                        logging.INFO,
-                        "Persisting component debug artifacts",
-                        period_id=period["period_id"],
-                        debug_inputs_root=component_inputs_root,
-                        debug_intermediate_root=component_intermediate_root,
-                    )
-                else:
-                    component_inputs_root = ensure_dir(transient_root / "inputs" / "components")
-                    component_intermediate_root = ensure_dir(transient_root / "intermediate" / "components")
-                    emit_pipeline_log(
-                        logging.INFO,
-                        "Using temporary directories for component debug artifacts",
-                        period_id=period["period_id"],
-                        temporary_root=transient_root,
-                        auto_cleanup=True,
-                    )
+                component_inputs_root = ensure_dir(inputs_dir(period_dir) / "components")
+                component_intermediate_root = ensure_dir(intermediate_dir(period_dir) / "components")
+                emit_pipeline_log(
+                    logging.INFO,
+                    "Persisting component debug artifacts",
+                    period_id=period["period_id"],
+                    debug_inputs_root=component_inputs_root,
+                    debug_intermediate_root=component_intermediate_root,
+                    cleanup_after_publish_success=(not save_debug_artifacts),
+                )
                 component_mosaic_sources: List[Dict[str, Any]] = []
                 emit_pipeline_stage(
                     "Component Execution",
@@ -4143,9 +4129,7 @@ def run_stac_representative_calendar_pipeline(
                             "post": post_meta,
                         },
                     }
-                    component_results.append(
-                        component_record if save_debug_artifacts else strip_debug_artifact_paths(component_record)
-                    )
+                    component_results.append(component_record)
                     component_mosaic_sources.append(
                         {
                             "component_id": component_id,
@@ -4475,26 +4459,16 @@ def run_stac_representative_calendar_pipeline(
         downloader = S3Downloader()
         with tempfile.TemporaryDirectory(prefix="sr_period_") as transient_dir:
             transient_root = Path(transient_dir)
-            if save_debug_artifacts:
-                window_raw_dir = ensure_dir(inputs_dir(period_dir) / train_cfg.get("window_raw_dir_name", "window_raw"))
-                composite_dir = ensure_dir(intermediate_dir(period_dir) / train_cfg.get("composite_dir_name", "composite"))
-                emit_pipeline_log(
-                    logging.INFO,
-                    "Persisting period debug artifacts",
-                    period_id=period["period_id"],
-                    window_raw_dir=window_raw_dir,
-                    composite_dir=composite_dir,
-                )
-            else:
-                window_raw_dir = ensure_dir(transient_root / train_cfg.get("window_raw_dir_name", "window_raw"))
-                composite_dir = ensure_dir(transient_root / train_cfg.get("composite_dir_name", "composite"))
-                emit_pipeline_log(
-                    logging.INFO,
-                    "Using temporary directories for period debug artifacts",
-                    period_id=period["period_id"],
-                    temporary_root=transient_root,
-                    auto_cleanup=True,
-                )
+            window_raw_dir = ensure_dir(inputs_dir(period_dir) / train_cfg.get("window_raw_dir_name", "window_raw"))
+            composite_dir = ensure_dir(intermediate_dir(period_dir) / train_cfg.get("composite_dir_name", "composite"))
+            emit_pipeline_log(
+                logging.INFO,
+                "Persisting period debug artifacts",
+                period_id=period["period_id"],
+                window_raw_dir=window_raw_dir,
+                composite_dir=composite_dir,
+                cleanup_after_publish_success=(not save_debug_artifacts),
+            )
 
             pre_paths = download_window_assets(selection["pre_items"], window_raw_dir / "pre", aoi_geometry, required_pols, downloader)
             post_paths = download_window_assets(selection["post_items"], window_raw_dir / "post", aoi_geometry, required_pols, downloader)
@@ -4549,10 +4523,10 @@ def run_stac_representative_calendar_pipeline(
             "run_dir": str(run_dir),
             "period_dir": str(period_dir),
             "manifest_path": str(manifest_path),
-            "window_raw_dir": (str(window_raw_dir) if save_debug_artifacts else None),
-            "composite_dir": (str(composite_dir) if save_debug_artifacts else None),
-            "t1_composite_path": (str(t1_composite_path) if save_debug_artifacts else None),
-            "t2_composite_path": (str(t2_composite_path) if save_debug_artifacts else None),
+            "window_raw_dir": str(window_raw_dir),
+            "composite_dir": str(composite_dir),
+            "t1_composite_path": str(t1_composite_path),
+            "t2_composite_path": str(t2_composite_path),
             "output_tif": None,
             "output_sr_vv_tif": packaged_outputs["output_sr_vv_tif"],
             "output_sr_vh_tif": packaged_outputs["output_sr_vh_tif"],
@@ -4608,14 +4582,10 @@ def run_stac_representative_calendar_pipeline(
                 "pre": pre_meta,
                 "post": post_meta,
             },
-            "downloaded_files": (
-                {
-                    "pre": {pol: [str(p) for p in paths] for pol, paths in pre_paths.items()},
-                    "post": {pol: [str(p) for p in paths] for pol, paths in post_paths.items()},
-                }
-                if save_debug_artifacts
-                else None
-            ),
+            "downloaded_files": {
+                "pre": {pol: [str(p) for p in paths] for pol, paths in pre_paths.items()},
+                "post": {pol: [str(p) for p in paths] for pol, paths in post_paths.items()},
+            },
             "run_config": {
                 "stac_url": stac_cfg.get("url", DEFAULT_STAC_API),
                 "collection": stac_cfg.get("collection", DEFAULT_COLLECTION),
@@ -4991,10 +4961,13 @@ def run_gee_representative_calendar_pipeline(
             parent_source_t2_items: List[Dict[str, Any]] = []
             with tempfile.TemporaryDirectory(prefix=f"sr_components_{period['period_id']}_") as transient_dir:
                 transient_root = Path(transient_dir)
-                component_intermediate_root = resolve_optional_debug_dir(
-                    persist=save_debug_artifacts,
-                    persistent_path=intermediate_dir(period_dir) / "components",
-                    transient_path=transient_root / "components",
+                component_intermediate_root = ensure_dir(intermediate_dir(period_dir) / "components")
+                emit_pipeline_log(
+                    logging.INFO,
+                    "Persisting component debug artifacts",
+                    period_id=period["period_id"],
+                    debug_intermediate_root=component_intermediate_root,
+                    cleanup_after_publish_success=(not save_debug_artifacts),
                 )
                 component_mosaic_sources: List[Dict[str, Any]] = []
                 emit_pipeline_stage(
@@ -5164,9 +5137,7 @@ def run_gee_representative_calendar_pipeline(
                         "t2_composite_path": str(t2_composite_path),
                         "composite": composite_meta,
                     }
-                    component_results.append(
-                        component_record if save_debug_artifacts else strip_debug_artifact_paths(component_record)
-                    )
+                    component_results.append(component_record)
                     component_mosaic_sources.append(
                         {
                             "component_id": component_id,
@@ -5461,10 +5432,13 @@ def run_gee_representative_calendar_pipeline(
         public_item_id = _whole_monthly_sr_item_id(aoi_id, period["period_id"])
         with tempfile.TemporaryDirectory(prefix="sr_period_") as transient_dir:
             transient_root = Path(transient_dir)
-            composite_dir = resolve_optional_debug_dir(
-                persist=save_debug_artifacts,
-                persistent_path=intermediate_dir(period_dir) / "composite",
-                transient_path=transient_root / "composite",
+            composite_dir = ensure_dir(intermediate_dir(period_dir) / "composite")
+            emit_pipeline_log(
+                logging.INFO,
+                "Persisting period debug artifacts",
+                period_id=period["period_id"],
+                composite_dir=composite_dir,
+                cleanup_after_publish_success=(not save_debug_artifacts),
             )
             pre_collection = _build_gee_scene_collection(collection_id, selection["pre_items"])
             post_collection = _build_gee_scene_collection(collection_id, selection["post_items"])
@@ -5549,9 +5523,9 @@ def run_gee_representative_calendar_pipeline(
             "run_dir": str(run_dir),
             "period_dir": str(period_dir),
             "manifest_path": str(manifest_path),
-            "composite_dir": (str(composite_dir) if save_debug_artifacts else None),
-            "t1_composite_path": (str(t1_composite_path) if save_debug_artifacts else None),
-            "t2_composite_path": (str(t2_composite_path) if save_debug_artifacts else None),
+            "composite_dir": str(composite_dir),
+            "t1_composite_path": str(t1_composite_path),
+            "t2_composite_path": str(t2_composite_path),
             "output_tif": None,
             "output_sr_vv_tif": packaged_outputs["output_sr_vv_tif"],
             "output_sr_vh_tif": packaged_outputs["output_sr_vh_tif"],
@@ -5761,6 +5735,7 @@ def run_stac_trainlike_pipeline(
     items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, query_args, required_pols)
     if not items:
         raise RuntimeError(f"No STAC items passed hard filters for {aoi_path}.")
+    datetime_resolution = compact_jsonable((config.get("_runtime", {}) or {}).get("datetime_resolution"))
 
     anchor_candidate, required_scene_count = choose_anchor_candidate(items, aoi_bbox, aoi_geometry, train_cfg, pair_cfg)
     manifest = build_trainlike_anchor_manifest(anchor_candidate, aoi_bbox, str(aoi_path), required_pols)
@@ -5800,15 +5775,15 @@ def run_stac_trainlike_pipeline(
     pair_id = manifest["pair_id"]
     with tempfile.TemporaryDirectory(prefix="sr_anchor_") as transient_dir:
         transient_root = Path(transient_dir)
-        window_raw_dir = resolve_optional_debug_dir(
-            persist=save_debug_artifacts,
-            persistent_path=inputs_dir(run_dir) / train_cfg.get("window_raw_dir_name", "window_raw"),
-            transient_path=transient_root / train_cfg.get("window_raw_dir_name", "window_raw"),
-        )
-        composite_dir = resolve_optional_debug_dir(
-            persist=save_debug_artifacts,
-            persistent_path=intermediate_dir(run_dir) / train_cfg.get("composite_dir_name", "composite"),
-            transient_path=transient_root / train_cfg.get("composite_dir_name", "composite"),
+        window_raw_dir = ensure_dir(inputs_dir(run_dir) / train_cfg.get("window_raw_dir_name", "window_raw"))
+        composite_dir = ensure_dir(intermediate_dir(run_dir) / train_cfg.get("composite_dir_name", "composite"))
+        emit_pipeline_log(
+            logging.INFO,
+            "Persisting trainlike debug artifacts",
+            run_dir=run_dir,
+            window_raw_dir=window_raw_dir,
+            composite_dir=composite_dir,
+            cleanup_after_publish_success=(not save_debug_artifacts),
         )
         downloader = S3Downloader()
         pre_paths = download_window_assets(pre_items, window_raw_dir / "pre", aoi_geometry, required_pols, downloader)
@@ -5857,10 +5832,10 @@ def run_stac_trainlike_pipeline(
         "aoi_geojson": resolve_aoi_source_ref(config, aoi_path),
         "run_dir": str(run_dir),
         "anchor_manifest_path": str(manifest_path),
-        "window_raw_dir": (str(window_raw_dir) if save_debug_artifacts else None),
-        "composite_dir": (str(composite_dir) if save_debug_artifacts else None),
-        "t1_composite_path": (str(t1_composite_path) if save_debug_artifacts else None),
-        "t2_composite_path": (str(t2_composite_path) if save_debug_artifacts else None),
+        "window_raw_dir": str(window_raw_dir),
+        "composite_dir": str(composite_dir),
+        "t1_composite_path": str(t1_composite_path),
+        "t2_composite_path": str(t2_composite_path),
         "output_tif": None,
         "output_sr_vv_tif": packaged_outputs["output_sr_vv_tif"],
         "output_sr_vh_tif": packaged_outputs["output_sr_vh_tif"],
@@ -5897,14 +5872,10 @@ def run_stac_trainlike_pipeline(
             "pre": pre_meta,
             "post": post_meta,
         },
-        "downloaded_files": (
-            {
-                "pre": {pol: [str(p) for p in paths] for pol, paths in pre_paths.items()},
-                "post": {pol: [str(p) for p in paths] for pol, paths in post_paths.items()},
-            }
-            if save_debug_artifacts
-            else None
-        ),
+        "downloaded_files": {
+            "pre": {pol: [str(p) for p in paths] for pol, paths in pre_paths.items()},
+            "post": {pol: [str(p) for p in paths] for pol, paths in post_paths.items()},
+        },
         "run_config": {
             "stac_url": stac_cfg.get("url", DEFAULT_STAC_API),
             "collection": stac_cfg.get("collection", DEFAULT_COLLECTION),
