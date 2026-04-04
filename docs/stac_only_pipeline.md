@@ -1,135 +1,151 @@
-# STAC-Only Pipeline (Production Notes)
+# STAC Backend Guide
 
-## 1. Dinh huong production
+## 1. STAC backend hien nay dang o vai tro nao
 
-He thong production hien tai uu tien STAC-only, cu the:
+`stac_trainlike_composite` van duoc giu va da duoc canh chinh theo cung representative-month semantics voi GEE. Tuy nhien inventory STAC test hien tai van ngheo item, nen backend nay hien phu hop hon cho:
 
-- workflow.mode = stac_trainlike_composite
+- parity testing
+- spatial logic validation
+- exact pair debug
+- benchmark/QA
+- chuyen lai production sau nay khi inventory du day
 
-Muc tieu:
+## 2. Dieu bat buoc giu giong GEE
 
-- giam phu thuoc GEE cho luong van hanh
-- xu ly du lieu dau vao on-site qua STAC + S3
-- tao input train-like bang local compositing
+Khi STAC du item, ket qua phai giong GEE o cac diem sau:
 
-## 2. Luong STAC-only end-to-end
+- cung period generation theo `calendar month`
+- cung `period_anchor_datetime = midpoint that cua period`
+- cung `pre/S1T2`, `post/S1T1`
+- cung geometry-based AOI coverage
+- cung representative relaxation ladder
+- cung witness support pair semantics
+- cung `EPSG:3857`, `10m`
+- cung focal config
+- cung `model(S1T1=later, S1T2=earlier)`
 
-1. Query STAC items theo AOI + datetime
-2. Hard filter item (IW, GRD, VV/VH, asset hop le)
-3. Sinh support pairs va de xuat anchor
-4. Chon anchor theo ranking latest_input_datetime
-5. Tao pre/post windows quanh anchor
-6. Download scene trong windows (subset AOI)
-7. Warp tat ca ve grid chung
-8. nanmedian per-pol per-window
-9. focal median smoothing
-10. Tao s1t1/s1t2 composite 2-band
-11. Infer multiband
+Khac biet backend:
 
-## 3. Cac cong thuc quan trong
+- STAC: download subsets + local composite
+- GEE: query/export composite trong Earth Engine
 
-## 3.1 Coverage
+## 3. STAC co nhung che do nao
 
-coverage = area(intersection(AOI_bbox, item_bbox)) / area(AOI_bbox)
+### 3.1 Representative-month mode
 
-Mac dinh min_aoi_coverage = 1.0.
+Bat khi:
 
-## 3.2 Support pair time gate cho anchor
+- `trainlike.selection_strategy = representative_calendar_period`
 
-Trong train-like mode:
+No la che do can parity voi GEE.
 
-- delta >= anchor_min_delta_hours (neu khong set thi fallback pairing.min_delta_hours)
-- delta <= window_before_days + window_after_days
+### 3.2 Legacy anchor-driven mode
 
-Luu y:
+Bat khi `selection_strategy` khong phai representative-month.
 
-- day la logic theo suggest_trainlike_anchors
-- pairing.max_delta_days la gate cua exact_pair, khong la tran chinh trong support pair cua train-like
+Che do nay van duoc giu vi ly do:
 
-## 3.3 Window convention
+- backward compatibility
+- benchmark cu
+- debug
 
-Voi anchor A:
+Nhung no khong phai recipe production ma team dang chot.
 
-- pre (S1T2): [A - before, A)
-- post (S1T1): [A, A + after]
+## 4. Luong xu ly representative-month tren STAC
 
-## 3.4 Composite
+1. query STAC items theo AOI + datetime
+2. hard filter item (`VV/VH`, `IW`, `GRD`, asset hop le)
+3. annotate geometry coverage cho tung item
+4. chia range thanh `calendar month`
+5. voi moi thang:
+   - cat `pre` va `post`
+   - dedupe scene
+   - chon pools bang relaxation ladder
+   - chon witness support pair
+6. download AOI subsets cua scene duoc chon
+7. align local ve target grid canonical
+8. local `nanmedian` composite cho `VV` va `VH`
+9. ap focal median neu bat
+10. infer SR
 
-Cho moi polarization:
+## 5. Spatial semantics tren STAC
 
-- C = nanmedian(scene_stack_aligned)
-- C_smooth = focal_median(C, radius_m)
+Metric chinh:
 
-## 4. Vi sao STAC-only van train-like
+- `coverage = area(intersection(AOI_geometry, item_geometry)) / area(AOI_geometry)`
 
-So voi exact raw pair:
+Hard gate:
 
-- dung nhieu scene thay vi 1 scene
-- co trung vi theo window de on dinh noise
-- co focal median de giam speckle
-- dau ra 2-band giu dung expectation infer_production
+- `coverage > min_aoi_coverage`
 
-## 5. So sanh voi nhom GEE tools
+Khong con hard gate nao dang yeu cau:
 
-GEE tools:
+- `AOI bbox coverage = 1.0`
+- `bbox_overlap >= nguong`
 
-- gee_compare_download.py
-- gee_trainlike_download.py
+`bbox_overlap` va `aoi_bbox_coverage_*` van duoc giu de diagnostic.
 
-Vai tro:
+## 6. Khi nao STAC representative-month se skip
 
-- benchmark, doi chieu, phan tich domain
+Mot period co the bi skip khi:
 
-Khong phai luong production chinh do:
+- range query khong chua thang day du trong khi `allow_partial_periods=false`
+- khong co item o nua dau hoac nua sau
+- co item nhung khong level nao trong ladder hop le
+- inventory ngheo den muc khong tao duoc pre/post pool can bang
 
-- phu thuoc EE project/auth
-- khong phai data path van hanh chinh tai he thong STAC noi bo
+## 7. Trang thai inventory STAC hien tai
 
-## 6. Config production de xuat
+Theo suite AOI hien tai:
 
-Tu config hien tai:
+- 3 AOI Hanoi co `2 items`
+- 3 AOI con lai chi co `1 item`
+- 1 AOI coastal mixed co `0 item`
 
-- mode: stac_trainlike_composite
-- window_before_days: 30
-- window_after_days: 30
-- min_scenes_per_window: 1
-- target_crs: EPSG:3857
-- target_resolution: 10
-- focal_median_radius_m: 15
-- min_aoi_coverage: 1.0
-- min_delta_hours: 24
+Y nghia:
 
-## 7. Checklist truoc khi run
+- STAC hien hop de debug coverage/intersection logic
+- STAC hien chua hop de ket luan production quality cho representative-month
 
-1. STAC service online, collection dung
-2. datetime range du rong
-3. AOI hop le
-4. S3 download truy cap duoc
-5. output dir co quyen ghi
-6. infer dependencies da cai
+## 8. Khi nao co the quay lai STAC cho production
 
-## 8. Monitoring sau khi run
+Nen quay lai STAC khi inventory da dap ung toi thieu:
 
-Xem run_summary.json/md de check:
+- co item o ca 2 nua thang tren cac AOI production
+- representative ladder thuong xuyen thanh cong o it nhat level 1 hoac 2
+- geometry coverage / union coverage cua pools khong qua thieu
+- output distribution va visual QA gan voi GEE tren nhung AOI doi chung
 
-- anchor datetime
-- latest_input_datetime
-- pre/post scene counts
-- support pair delta
-- output path
+## 9. Checklist parity voi GEE
 
-Neu fail anchor:
+Khi so STAC voi GEE, nen check:
 
-- mo rong datetime
-- giam min_scenes_per_window
-- xem lai same_orbit_direction
+- cung `period_id`
+- cung split `pre/post`
+- `selected_relaxation_name` co hop ly / tuong dong
+- pre/post scene counts co cung cap logic
+- union coverage diagnostics khong lech bat thuong
+- witness pair co y nghia tuong dong
+- output SR khong bi shift distribution vo ly
 
-## 9. Lenh production mau
+## 10. Lenh debug STAC huu ich
+
+### 10.1 Exact pair ranking
+
+```bash
+python query_stac_download.py pair \
+  --geojson geojson/generated_aoi/aoi_suite_hanoi_urban_square.geojson \
+  --datetime 2025-01-01/2025-12-31 \
+  --top-k 10
+```
+
+### 10.2 Representative-month pipeline
 
 ```bash
 python sar_pipeline.py \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
   --mode stac_trainlike_composite \
-  --datetime 2025-07-01/2025-09-10
+  --geojson geojson/generated_aoi/aoi_suite_hanoi_urban_square.geojson \
+  --config config/pipeline_config.yaml \
+  --datetime 2025-01-01/2025-12-31 \
+  --output-dir runs/customer_jobs_stac
 ```
-

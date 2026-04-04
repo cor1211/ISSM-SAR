@@ -60,4 +60,15 @@ model.gv
 .DS_Store
 Thumbs.db
 
-config/
+config/*
+!config/base_config.yaml
+!config/evaluate_config.yaml
+!config/infer_config.yaml
+!config/inference_config.yaml
+!config/kaggle_config.yaml
+!config/pipeline_config.yaml
+!config/pipeline_config_stac_runtime.yaml
+!config/pipeline_config_gee_runtime.yaml
+!config/server/
+config/server/*
+!config/server/base_config.yaml

@@ -24,6 +24,20 @@ def denorm(x, mean=0.5, std=0.5):
     return (x * std + mean).clamp(0, 1)
 
 
+def resolve_temporal_inputs(batch):
+    """Return inputs using the canonical training semantics when available.
+
+    Canonical convention for the current model:
+      - S1T1 / T1: post/future input
+      - S1T2 / T2: pre/past input
+
+    Legacy keys T1/T2 are kept for backward compatibility with older datasets.
+    """
+    s1t1 = batch.get('S1T1', batch['T1'])
+    s1t2 = batch.get('S1T2', batch['T2'])
+    return s1t1, s1t2
+
+
 class ISSM_SAR_Lightning(pl.LightningModule):
     def __init__(self, config: dict):
         super().__init__()
@@ -114,6 +128,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
         self.accumulate_count = 0
 
     def forward(self, s1t1, s1t2):
+        """Forward pass using the training convention: model(S1T1_post, S1T2_pre)."""
         return self.model(s1t1, s1t2)
     
     def _compute_reconstruction_losses(self, sr_up, sr_down, hr, dtype):
@@ -185,8 +200,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             opt_d = None
         
         # Get data
-        s1t1 = batch['T1']
-        s1t2 = batch['T2']
+        s1t1, s1t2 = resolve_temporal_inputs(batch)
         hr = batch['HR']
         
         # Forward pass (generator)
@@ -365,8 +379,7 @@ class ISSM_SAR_Lightning(pl.LightningModule):
             return
 
         # Get data
-        s1t1 = batch['T1']
-        s1t2 = batch['T2']
+        s1t1, s1t2 = resolve_temporal_inputs(batch)
         hr = batch['HR']
         
         # Forward

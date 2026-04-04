@@ -20,6 +20,13 @@ class MultiTempSARDataset(Dataset):
             phase (str): 'train' or 'val'.
             transform (bool): Apply Augmentation ? (for only train phase).
             norm_npy (bool): Normalize input from [0, 1] to [-1, 1].
+
+        Temporal convention used by the training dataset:
+            - S1T1: post / future window relative to the reference time, typically [time, time + 7d]
+            - S1T2: pre / past window relative to the reference time, typically [time - 7d, time]
+
+        For backward compatibility the dataset still returns legacy keys `T1` / `T2`,
+        but they are aliases of `S1T1` / `S1T2`.
         """
         self.phase = phase
         root_dir = os.path.join(root_dir, self.phase)
@@ -120,7 +127,14 @@ class MultiTempSARDataset(Dataset):
         t2_tensor = torch.from_numpy(img_t2)
         hr_tensor = torch.from_numpy(img_hr)
 
-        return {'T1': t1_tensor, 'T2': t2_tensor, 'HR': hr_tensor, 'filename': filename}
+        return {
+            'T1': t1_tensor,
+            'T2': t2_tensor,
+            'S1T1': t1_tensor,
+            'S1T2': t2_tensor,
+            'HR': hr_tensor,
+            'filename': filename,
+        }
 
 
 

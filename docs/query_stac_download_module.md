@@ -1,265 +1,254 @@
-# query_stac_download.py Module Guide (Code-Accurate)
+# `query_stac_download.py` Module Guide
 
-## 1. Muc tieu module
+## 1. Day la module goc ve spatial-selection
 
-query_stac_download.py cung cap tang STAC low-level de:
+`query_stac_download.py` la noi goc cua logic:
 
-- query item
-- hard-filter item
-- tim exact pairs
-- rank pairs
-- diagnose khi khong co pair
-- de xuat train-like anchors
-- tao manifest exact pair va trainlike anchor
+- doc va canonicalize AOI
+- query STAC items
+- hard filter item
+- compute AOI geometry coverage
+- representative-month scene selection
+- witness support pair
+- diagnostics cho sparse inventory / representative selection
 
-Module nay duoc dung truc tiep boi:
+Mot so helper GEE cung tai su dung semantics tu day de giu parity.
 
-- sar_pipeline.py
-- gee_compare_download.py
+## 2. AOI duoc xu ly nhu the nao
 
-## 2. Input, filter khong gian, thoi gian
+### 2.1 Canonical AOI
 
-## 2.1 Spatial filter
+`load_geojson_aoi()` luon:
 
-Module ho tro:
+1. doc geometry that tu GeoJSON
+2. repair geometry neu can
+3. tinh lai bbox canonical tu geometry
+4. bo qua top-level `bbox` neu bbox trong file sai
 
-- bbox
-- geojson intersects
+### 2.2 Vi sao can lam vay
 
-Qua trinh:
+Neu chi dua vao bbox trong file, co the gap nhung van de sau:
 
-1. resolve_spatial_filter lay bbox + intersects geometry
-2. STAC client query theo collection, datetime, limit
+- bbox bi viet sai
+- AOI multipolygon co nhieu mien roi nhau
+- AOI geometry mong, strip, hoac co hinh dang rat khac bbox
 
-## 2.2 Hard filter item
+Vi vay, geometry moi la source of truth cho decision spatial.
 
-apply_hard_filters loai item neu vi pham:
+## 3. Spatial semantics dang dung
 
-- instrument_mode != IW
-- product_type != GRD
-- thieu polarization bat buoc (VV/VH)
-- khong co href doc duoc cho polarization can dung
-- neu co orbit_state filter thi phai match
-- neu co relative_orbit filter thi phai match
+### 3.1 Metric chinh
+
+Item coverage duoc tinh la:
+
+- `aoi_coverage(item) = area(intersection(AOI_geometry, item_geometry)) / area(AOI_geometry)`
+
+Day la hard-filter metric chinh.
+
+### 3.2 Hard gate
+
+- item/pair hop le khi `aoi_coverage > min_aoi_coverage`
+- default hien tai: `min_aoi_coverage = 0.0`
+
+### 3.3 Geometry fallback
+
+Module resolve geometry cua item theo thu tu:
+
+1. `item.geometry`
+2. `item.bbox -> polygon`
+3. neu ca hai fail, item xem nhu coverage = 0
+
+Invalid geometry duoc repair theo thu tu:
+
+1. `make_valid`
+2. `buffer(0)`
+3. fallback sang bbox neu co
+
+### 3.4 Diagnostic metrics
+
+Ngoai metric chinh, module van giu:
+
+- `aoi_bbox_coverage_*`
+- `bbox_overlap`
+- `aoi_union_coverage_pair`
+- `pre_union_coverage`
+- `post_union_coverage`
+- `combined_union_coverage`
 
 Y nghia:
 
-- Day la hard gate truoc khi vao bai toan pair/anchor
+- `aoi_bbox_coverage_*`, `bbox_overlap`
+  - chi de diagnostic/backward comparison
+- union coverage
+  - dung de ranking phu va QA
+  - khong phai hard gate
 
-## 3. Cong thuc hinh hoc va metric
+## 4. Hard filter item
 
-## 3.1 bbox_intersection
+`collect_items_with_filters()` lam cac viec sau:
 
-inter(b1, b2) = dien tich giao nhau cua 2 bbox.
+1. query STAC bang `intersects`
+2. loc collection / datetime / limit
+3. loc `VV/VH`
+4. loc `IW`
+5. loc `GRD`
+6. kiem tra asset can thiet
+7. annotate geometry coverage cho tung item
 
-## 3.2 bbox_area
+Ham nay tra ve:
 
-area(b) = (maxx - minx) * (maxy - miny), co clamp >= 0.
+- `items`
+- `aoi_bbox` canonical
+- `aoi_geometry` canonical
 
-## 3.3 bbox_overlap_ratio
+## 5. Legacy pair logic
 
-overlap = inter(bbox1, bbox2) / min(area1, area2)
+Standalone exact-pair selection da duoc loai khoi module nay de giu core runtime gon va dung voi cac luong chuan hien tai.
 
-Neu khong giao nhau thi overlap = 0.
+Nhung metric sau van con ton tai vi chung van co gia tri cho:
 
-## 3.4 coverage_ratio
+- representative-month diagnostics
+- witness support pair
+- QA ve AOI geometry coverage
 
-coverage = inter(reference_bbox, item_bbox) / area(reference_bbox)
+Bao gom:
 
-Trong pipeline hien tai, reference_bbox thuong la AOI bbox.
+- `aoi_bbox_coverage_*`
+- `bbox_overlap`
+- `aoi_union_coverage_pair`
+- `pre_union_coverage`
+- `post_union_coverage`
+- `combined_union_coverage`
 
-## 4. Tim exact pairs
+## 6. Representative-month helpers
 
-## 4.1 Dieu kien pair hop le trong find_pairs
+Cac helper chinh:
 
-Voi sorted items theo datetime, pair (i, j), i < j:
+- `expand_month_periods()`
+- `collect_period_half_items()`
+- `select_representative_scene_pools()`
+- `select_witness_support_pair()`
+- `build_representative_period_manifest()`
 
-1. Neu same_orbit_direction = true:
-   orbit_state(i) va orbit_state(j) phai bang nhau
-2. delta_sec = t_j - t_i
-3. delta_sec >= min_delta_hours * 3600
-4. delta_sec <= max_delta_days * 86400
-5. coverage_t1 >= min_aoi_coverage
-6. coverage_t2 >= min_aoi_coverage
+## 7. `expand_month_periods()` xu ly range nhu the nao
 
-Luu y:
+Input:
 
-- Neu delta_sec > max_delta_sec thi break inner loop (vi list da sort theo time)
-- overlap duoc ghi lai, khong phai hard filter
-- min_overlap duoc truyen qua API, nhung trong find_pairs hien tai khong su dung de cat pair
+- `datetime_range`
+- `allow_partial_periods`
 
-## 4.2 Ranking pair
+Hanh vi:
 
-pair_rank_key:
+- parse range huu han
+- chia thanh tung `calendar month`
+- neu `allow_partial_periods=false`, chi giu thang day du
+- period anchor = midpoint that cua period
 
-1. t2 moi nhat
-2. t1 moi nhat
-3. delta_seconds nho hon
-4. bbox_overlap lon hon
-5. t1_id, t2_id
+## 8. `collect_period_half_items()` xu ly item nhu the nao
 
-search_pairs_sorted = find_pairs + sorted(pair_rank_key)
+Cho 1 period:
 
-## 4.3 Chan doan khong co pair
+- `pre` la scene nam trong `[period_start, period_anchor)`
+- `post` la scene nam trong `[period_anchor, period_end)`
+- moi item phai co `aoi_coverage > min_aoi_coverage`
 
-diagnose_no_pair thong ke:
+Ham nay khong tu chon signature/relaxation. No chi cat item theo period split.
 
-- item_count
-- total pair duyet
-- pair fail do orbit direction
-- pair fail do min time
-- pair fail do max time
-- pair fail do coverage
+## 9. `select_representative_scene_pools()` lam gi
 
-Tra ve reason chinh:
+Ham nay la trai tim cua representative-month selection.
 
-- INSUFFICIENT_ITEMS
-- NO_PAIR_WITH_ORBIT_DIRECTION
-- ONLY_SAME_DATATAKE_CANDIDATES
-- NO_PAIR_WITH_MIN_TIME_GAP
-- NO_PAIR_WITH_MAX_TIME_WINDOW
-- NO_PAIR_WITH_FULL_AOI_COVERAGE
-- NO_VALID_PAIR
+### 9.1 Relaxation ladder
 
-Dong thoi tao best_relaxed (nhe dieu kien) de debug.
+Thu tu level:
 
-## 5. Anchor de xuat cho train-like
+1. `same_orbit_state_and_relative_orbit`
+2. `same_orbit_state_only`
+3. `same_orbit_state_one_scene_min`
+4. `mixed_orbit_allowed`
 
-## 5.1 Y tuong
+Neu `require_same_orbit_direction=true`, level 4 bi bo.
 
-support pair -> midpoint -> anchor candidate -> danh gia pre/post windows -> rank.
+### 9.2 Candidate grouping
 
-## 5.2 Window definition
+Cac item pre/post duoc group theo `signature_mode`:
 
-Voi anchor = A:
+- `orbit_state_relative_orbit`
+- `orbit_state_only`
+- `mixed`
 
-- pre: [A - window_before_days, A)
-- post: [A, A + window_after_days]
+Moi signature chung giua pre va post sinh ra 1 candidate pool.
 
-collect_anchor_window_items giu item khi:
+### 9.3 Candidate ranking
 
-- coverage(AOI, item) >= min_aoi_coverage
-- datetime nam trong pre hoac post
+Thu tu rank hien tai:
 
-## 5.3 Dieu kien support pair trong suggest_trainlike_anchors
+1. `min(pre_scene_count, post_scene_count)` lon hon
+2. `abs(pre_scene_count - post_scene_count)` nho hon
+3. `min(pre_unique_datetime_count, post_unique_datetime_count)` lon hon
+4. `min(pre_union_coverage, post_union_coverage)` lon hon
+5. `combined_union_coverage` lon hon
+6. anchor gap nho hon
+7. `post_latest_scene_datetime` moi hon
+8. signature token on dinh
 
-Support pair dat khi:
+## 10. Witness support pair
 
-- delta >= min_delta_hours
-- delta <= (window_before_days + window_after_days)
-- coverage_t1, coverage_t2 >= min_aoi_coverage
-- same_orbit_direction (neu bat)
+`select_witness_support_pair()` chon 1 cap scene trong pools da chot.
 
-Luu y mapping tham so:
+Thu tu ranking witness pair:
 
-- min_delta_hours o ham nay la gia tri caller truyen vao.
-- Trong sar_pipeline train-like, gia tri do duoc lay tu trainlike.anchor_min_delta_hours,
-  neu khong co thi fallback pairing.min_delta_hours.
+1. temporal gap nho nhat qua anchor
+2. uu tien cung `relative_orbit`
+3. uu tien cung `orbit_state`
+4. min geometry coverage cao hon
+5. ID on dinh
 
-Luu y quan trong:
+Witness pair chi dung cho:
 
-- O day khong dung pairing.max_delta_days.
-- Tran tren support gap duoc tinh theo tong do dai 2 windows.
+- provenance
+- QA
+- giai thich manifest
 
-## 5.4 Dedupe scene
+Witness pair khong dung de sinh anchor trong representative-month.
 
-summarize_unique_scenes dung scene key:
+## 11. Cac truong hop spatial can hieu ro
 
-- (datetime, platform, orbit_state, relative_orbit, slice_number)
+### 11.1 AOI mong, bbox rong
 
-Muc tieu:
+Neu AOI la mot strip heo va bbox rat rong:
 
-- tranh mot acquisition dong gop nhieu lan cho cung window.
+- geometry coverage moi la metric chinh
+- bbox coverage co the cao/thap theo cach khong con y nghia bang
+- representative selection van dung geometry that
 
-## 5.5 Dieu kien anchor candidate hop le
+### 11.2 AOI multipolygon / disjoint
 
-Sau dedupe:
+Neu AOI co nhieu mien roi nhau:
 
-- len(pre_scenes) >= min_scenes_per_window
-- len(post_scenes) >= min_scenes_per_window
+- item giao 1 phan cua AOI van co the pass neu `coverage > threshold`
+- union coverage giup do muc do phu tong the cua pools/pairs
+- pipeline khong ep item phai phu toan bo bbox
 
-## 5.6 Ranking anchor
+### 11.3 Nhieu item giao nhung giua AOI co khoang trong
 
-anchor_rank_key uu tien:
+Neu phan tren giao item A, phan duoi giao item B, phan giua khong giao item nao:
 
-1. post_latest_scene_datetime moi nhat
-2. anchor_datetime moi nhat
-3. support_t2_datetime moi nhat
-4. pre_latest_scene_datetime moi nhat
-5. support_pair_delta_seconds nho hon
-6. support_t1_id, support_t2_id
+- tung item van co the pass neu `coverage > threshold`
+- `combined_union_coverage` se phan anh phan thieu nay
+- pipeline khong skip chi vi co khoang trong, vi union coverage chi la ranking/diagnostic phu
 
-## 6. Manifest formats
+## 12. CLI debug nen dung khi can
 
-## 6.1 Exact pair manifest
+Cac command huu ich:
 
-build_manifest_for_pair tao thong tin:
+- `list`
+  - xem items sau hard filter
+- `download`
+  - tai cap asset theo item IDs da biet
+- `download-href`
+  - tai truc tiep mot href khi can debug ket noi hoac kiem tra asset
 
-- pair_id
-- t1/t2 id, datetime
-- delta_seconds/hours/days
-- orbit, relative_orbit, slice
-- bbox_overlap
-- aoi_bbox_coverage_t1/t2
-- assets href cho moi pol (VV, VH)
+## 13. Ket luan operational
 
-## 6.2 Trainlike anchor manifest
-
-build_trainlike_anchor_manifest tao:
-
-- manifest_type = trainlike_anchor
-- anchor_source = stac_midpoint_pair
-- anchor_datetime
-- window_before_days, window_after_days
-- required_polarizations
-- pre/post scene lists
-- latest_input_datetime = post_latest_scene_datetime
-- support pair metadata (t1/t2, delta)
-
-## 7. CLI chinh cua module
-
-Script query_stac_download.py co cac command de:
-
-- query + inspect items
-- tim pair + report
-- suggest anchor
-- tao manifest
-- download theo manifest
-
-Nen dung khi can debug source STAC doc lap voi pipeline chinh.
-
-## 8. Ghi chu thuc te
-
-1. min_overlap hien la diagnostic metric, khong phai hard filter trong find_pairs.
-2. strict_slice duoc truyen qua call stack, nhung logic hard-filter slice trong find_pairs hien tai khong duoc apply.
-3. Coverage duoc tinh tren bbox, khong tinh tren polygon AOI chi tiet.
-4. Pair overlap va AOI coverage la 2 metric khac nhau, khong thay the nhau.
-
-## 9. Pseudo-code tong hop
-
-```text
-items = STAC.search(...)
-items = apply_hard_filters(items)
-
-# exact pair
-pairs = find_pairs(items,
-  min_delta_hours,
-  max_delta_days,
-  min_aoi_coverage,
-  same_orbit_direction)
-pairs = sort(pair_rank_key)
-
-# trainlike anchor
-candidates = []
-for support_pair in item_pairs:
-  if support_pair passes min_delta, max_support_gap, coverage, orbit:
-    anchor = midpoint(t1, t2)
-    pre, post = collect_window_items(anchor)
-    pre = dedupe(pre)
-    post = dedupe(post)
-    if len(pre) >= min_scenes and len(post) >= min_scenes:
-      candidates.append(anchor_candidate)
-
-candidates = sort(anchor_rank_key)
-```
-
+Neu co mau thuan giua docs va pipeline behavior, uu tien doc code trong module nay va `sar_pipeline.py`.

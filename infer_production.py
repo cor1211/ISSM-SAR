@@ -891,7 +891,7 @@ class SARInferencer:
         if not bool(semantics.get("matches_training_semantics", True)):
             logger.warning(
                 "  Pair '%s' does not follow the canonical training semantics. "
-                "This is acceptable for exact-pair benchmarking/debugging, but not the preferred production input convention.",
+                "This is acceptable for standalone pair benchmarking/debugging, but not the preferred production input convention.",
                 identifier,
             )
 

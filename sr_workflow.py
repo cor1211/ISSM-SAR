@@ -28,6 +28,13 @@ from sr_publish import (
 )
 
 
+def _resolve_pipeline_script_path() -> Path:
+    container_path = Path("/app/sar_pipeline.py")
+    if container_path.exists():
+        return container_path
+    return Path(__file__).resolve().with_name("sar_pipeline.py")
+
+
 DEFAULT_PIPELINE_CONFIG = "/app/config/pipeline_config_stac_runtime.yaml"
 
 
@@ -592,7 +599,8 @@ def attach_period_publish_result(
 
 
 def run_pipeline_subprocess(pipeline_args: Sequence[str]) -> int:
-    command = [sys.executable, "/app/sar_pipeline.py", *pipeline_args]
+    pipeline_script = _resolve_pipeline_script_path()
+    command = [sys.executable, str(pipeline_script), *pipeline_args]
     emit_workflow_log(logging.INFO, "Launching pipeline subprocess", command=command)
     completed = subprocess.run(command, check=False)
     emit_workflow_log(logging.INFO, "Pipeline subprocess finished", exit_code=completed.returncode)
@@ -809,7 +817,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     load_dotenv()
     args, pipeline_args = parse_workflow_args(argv)
     if args.pipeline_help:
-        completed = subprocess.run([sys.executable, "/app/sar_pipeline.py", "--help"], check=False)
+        pipeline_script = _resolve_pipeline_script_path()
+        completed = subprocess.run([sys.executable, str(pipeline_script), "--help"], check=False)
         return int(completed.returncode)
     if not pipeline_args:
         raise SystemExit("No pipeline arguments were provided. Pass normal sar_pipeline.py arguments to the workflow command.")

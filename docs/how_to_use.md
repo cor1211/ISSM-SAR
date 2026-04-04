@@ -1,399 +1,732 @@
-Cách chạy chuẩn hiện tại là dùng [sar_pipeline.py](/mnt/data1tb/vinh/ISSM-SAR/sar_pipeline.py).  
-Mode mặc định đã là `stac_trainlike_composite`, tức:
+# How To Use The Current Pipeline
 
-- đọc `AOI geojson`
-- query timeline trên STAC
-- chọn `1 anchor` theo `latest_input_datetime` mới nhất
-- tải các scene STAC đã **cắt theo bbox chứa AOI**
-- composite local
-- infer
-- trả ra `1 GeoTIFF SR`
+Neu can mot tai lieu mo ta full end-to-end cho composite pipeline hien tai, doc truoc `docs/composite_pipeline_end_to_end.md`. File nay giu vai tro source of truth cho flow production composite.
 
-**1. Chuẩn bị**
-Cần:
-- env `issm`
-- STAC/S3 truy cập được
-- weights/model config đúng
-- `.env` có S3 credentials nếu hệ thống STAC asset cần auth
+## 1. Pipeline hien tai dang chot cai gi
 
-File config chính:
-- pipeline: [pipeline_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/pipeline_config.yaml)
-- infer: [infer_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/infer_config.yaml)
+Production default hien tai trong `config/pipeline_config.yaml` la:
 
-Lưu ý quan trọng:
-- khi chạy `sar_pipeline.py`, `infer_config.yaml` chủ yếu dùng cho:
-  - `device`
-  - checkpoints
-  - normalization
-  - patch/batch/AMP
-- `input.input_dir` trong `infer_config.yaml` **không phải** đầu vào của pipeline này
-
-**2. Lệnh chạy production khuyến nghị**
-Ví dụ với AOI của bạn:
-
-```bash
-source /mnt/data1tb/miniconda3/etc/profile.d/conda.sh
-conda activate /mnt/data1tb/conda_envs/issm
-
-python sar_pipeline.py \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --config config/pipeline_config.yaml \
-  --datetime 2025-07-01/2025-09-10 \
-  --output-dir runs/customer_jobs \
-  --cache-staging
-```
-
-Đây là lệnh nên dùng trước tiên.
-
-**3. Các tham số chính của `sar_pipeline.py`**
-CLI hiện tại ở [sar_pipeline.py](/mnt/data1tb/vinh/ISSM-SAR/sar_pipeline.py).
-
-Bắt buộc:
-- `--geojson`
-  - AOI đầu vào
-
-Rất nên truyền:
-- `--datetime`
-  - khoảng thời gian query STAC
-  - ví dụ: `2025-07-01/2025-09-10`
-  - vì pipeline đang `newest-first`, bạn nên để khoảng đủ rộng để hệ thống tự chọn mốc mới nhất tốt nhất
-
-Tùy chọn workflow:
-- `--config`
-  - file config pipeline
-- `--mode`
-  - `stac_trainlike_composite`: production khuyến nghị
-  - `exact_pair`: chỉ để debug/so sánh
-
-Tùy chọn pair/filter:
-- `--min-delta-hours`
-  - delta tối thiểu giữa support pair
-  - mặc định: `24`
-- `--max-delta-days`
-  - delta tối đa giữa support pair
-  - mặc định: `10`
-- `--min-aoi-coverage`
-  - coverage tối thiểu của `AOI bbox` trên mỗi item
-  - mặc định: `1.0`
-- `--same-orbit-direction`
-  - nếu bật, support pair/anchor chỉ dùng các item cùng `ascending/descending`
-- `--auto-relax`
-  - chỉ hữu ích hơn trong mode `exact_pair`; với production train-like thường không cần bật
-
-Tùy chọn train-like composite:
-- `--window-before-days`
-  - độ dài window trước anchor
-  - mặc định: `30`
-- `--window-after-days`
-  - độ dài window sau anchor
-  - mặc định: `30`
-- `--min-scenes-per-window`
-  - số scene unique tối thiểu mỗi window
-  - mặc định hiện tại: `1`
-- `--target-crs`
-  - CRS chuẩn để align/composite
-  - mặc định: `EPSG:3857`
-- `--target-resolution`
-  - pixel size target
-  - mặc định: `10`
-- `--focal-median-radius-m`
-  - radius của bước làm mượt sau composite
-  - mặc định: `15`
-
-Tùy chọn chạy/infer:
-- `--device`
-  - `cuda`, `cuda:0`, `cpu`
-- `--output-dir`
-  - thư mục root của run
-- `--cache-staging`
-  - lưu thêm input aligned/composite để kiểm tra
-
-**4. Giá trị mặc định hiện tại**
-Trong [pipeline_config.yaml](/mnt/data1tb/vinh/ISSM-SAR/config/pipeline_config.yaml):
-
-- `workflow.mode = stac_trainlike_composite`
-- `pairing.pols = VV,VH`
-- `pairing.min_aoi_coverage = 1.0`
-- `pairing.min_delta_hours = 24`
-- `pairing.max_delta_days = 10`
-- `pairing.same_orbit_direction = false`
-- `trainlike.window_before_days = 30`
-- `trainlike.window_after_days = 30`
-- `trainlike.min_scenes_per_window = 1`
+- `workflow.mode = gee_trainlike_composite`
+- `trainlike.selection_strategy = representative_calendar_period`
+- `trainlike.period_mode = month`
+- `trainlike.period_boundary_policy = clip_inside_period`
+- `trainlike.period_split_policy = first_half_vs_second_half`
+- `trainlike.clip_mode = geometry`
 - `trainlike.target_crs = EPSG:3857`
-- `trainlike.target_resolution = 10`
-- `trainlike.focal_median_radius_m = 15`
+- `trainlike.target_resolution = 10.0`
+- `pairing.min_aoi_coverage = 0.0`
+- `trainlike.componentize_seed_intersections = false`
+- model semantics: `T1/S1T1 = later/post`, `T2/S1T2 = earlier/pre`
 
-**5. Lệnh production nên dùng theo từng tình huống**
+Y nghia thuc te:
 
-Chạy mặc định:
+- hien tai GEE la backend production de chot recipe vi inventory day hon
+- STAC van duoc giu song song theo cung semantics de sau nay quay lai ma khong doi logic chon du lieu
+- spatial hard filter khong dua vao bbox nua; dua vao geometry coverage that
+
+## 2. Lenh chay co ban
+
+### 2.1 GEE representative-month
+
 ```bash
 python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
-  --datetime 2025-01-01/2025-12-31
-```
-
-Chạy production, ép cùng hướng orbit:
-```bash
-python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
+  --geojson geojson/generated_aoi/aoi_suite_hanoi_urban_square.geojson \
+  --config config/pipeline_config.yaml \
   --datetime 2025-01-01/2025-12-31 \
-  --same-orbit-direction
+  --gee-project downloads1correspondings2sgdm \
+  --output-dir runs/customer_jobs
 ```
 
-Chạy production với window khác:
+Neu Earth Engine chua duoc auth tren may:
+
 ```bash
 python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
+  --geojson geojson/generated_aoi/aoi_suite_hanoi_urban_square.geojson \
+  --config config/pipeline_config.yaml \
   --datetime 2025-01-01/2025-12-31 \
-  --window-before-days 30 \
-  --window-after-days 30 \
-  --min-scenes-per-window 1
+  --gee-project downloads1correspondings2sgdm \
+  --output-dir runs/customer_jobs \
+  --authenticate
 ```
 
-Chạy debug bằng exact pair:
+### 2.2 STAC representative-month
+
 ```bash
 python sar_pipeline.py \
-  --geojson geojson/your_aoi.geojson \
+  --mode stac_trainlike_composite \
+  --geojson geojson/generated_aoi/aoi_suite_hanoi_urban_square.geojson \
+  --config config/pipeline_config.yaml \
+  --datetime 2025-01-01/2025-12-31 \
+  --output-dir runs/customer_jobs_stac
+```
+
+Luu y:
+
+- lenh STAC tren dung cho parity/debug hoac khi inventory STAC du item
+- voi inventory test hien tai, nhieu AOI se skip do thieu scene o 2 nua thang
+
+### 2.3 Exact pair debug
+
+```bash
+python sar_pipeline.py \
   --mode exact_pair \
-  --datetime 2025-01-01/2025-12-31
-```
-
-**6. Cách pipeline hiện chọn dữ liệu**
-Cho production `stac_trainlike_composite`:
-
-1. query STAC theo AOI + `datetime`
-2. hard filter theo `VV,VH`, `IW`, `GRD`, `AOI bbox coverage`
-3. sinh support pair
-4. từ mỗi support pair suy ra `anchor = midpoint`
-5. xếp hạng anchor theo:
-   - `latest_input_datetime` mới nhất
-   - rồi mới đến các tie-break khác
-6. chọn đúng `1 anchor`
-7. lấy:
-   - `pre window = [anchor - before_days, anchor]`
-   - `post window = [anchor, anchor + after_days]`
-8. tải các scene STAC trong 2 window dưới dạng **subset bbox chứa AOI**
-9. composite + focal median
-10. infer
-
-**7. Dữ liệu tải về có phải full item không?**
-Không.  
-Pipeline hiện tại tải **subset bbox AOI**, không tải full scene.
-
-Logic này ở [query_stac_download.py:699](/mnt/data1tb/vinh/ISSM-SAR/query_stac_download.py:699).
-
-**8. Output nằm ở đâu**
-Sau mỗi run, thư mục có dạng:
-
-- `runs/.../<aoi_stem>/<run_id>/manifest.json`
-- `runs/.../<aoi_stem>/<run_id>/run_summary.json`
-- `runs/.../<aoi_stem>/<run_id>/run_summary.md`
-- `runs/.../<aoi_stem>/<run_id>/window_raw/pre/*.tif`
-- `runs/.../<aoi_stem>/<run_id>/window_raw/post/*.tif`
-- `runs/.../<aoi_stem>/<run_id>/composite/s1t1_*.tif`
-- `runs/.../<aoi_stem>/<run_id>/composite/s1t2_*.tif`
-- `runs/.../<aoi_stem>/<run_id>/output/*_SR_x2.tif`
-
-Ví dụ run hiện tại:
-- [run_summary.md](/mnt/data1tb/vinh/ISSM-SAR/runs/customer_jobs/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2/20260317T152309/run_summary.md)
-
-**9. Lệnh debug rất hữu ích trước khi chạy full pipeline**
-
-Xem support pairs:
-```bash
-python query_stac_download.py pair \
   --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --datetime 2025-07-01/2025-09-10 \
-  --top-k 10
+  --config config/pipeline_config.yaml \
+  --datetime 2025-01-01/2025-12-31 \
+  --output-dir runs/customer_jobs_exact
 ```
 
-Xem anchor candidates:
-```bash
-python query_stac_download.py suggest-anchor \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --datetime 2025-07-01/2025-09-10 \
-  --window-before-days 30 \
-  --window-after-days 30 \
-  --min-scenes-per-window 1 \
-  --top-k 10
-```
+### 2.4 Query AOI tu database va chay tuan tu
 
-**10. Khuyến nghị thực tế**
-Nếu mục tiêu là “AOI khách hàng vào, trả SR từ dữ liệu mới nhất có thể”, mình khuyên dùng mặc định này:
+Neu da co thong tin `PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE` trong `.env`, pipeline co the doc AOI truc tiep tu `public.aois`.
+
+Rule hien tai:
+
+- chi lay record co `status = 'ACTIVE'`
+- chi doc `id`, `geom`, `status` va metadata toi thieu can thiet
+- transaction DB duoc mo theo che do `READ ONLY`
+- geometry tu DB se duoc materialize thanh file GeoJSON tam roi moi di vao pipeline hien tai
+
+Chay 1 AOI cu the theo `id`:
 
 ```bash
 python sar_pipeline.py \
-  --geojson geojson/<customer_aoi>.geojson \
+  --db-aoi-id 253ddb30-439d-4c33-8fa3-729e5ba73032 \
+  --mode gee_trainlike_composite \
+  --target-month 2025-01 \
+  --output-dir runs/customer_jobs_db_single
+```
+
+Chay toan bo AOI `ACTIVE` theo thu tu truy van, co limit an toan:
+
+```bash
+python sar_pipeline.py \
+  --db-all-active-aois \
+  --db-limit 2 \
+  --mode stac_trainlike_composite \
+  --target-month 2025-03 \
+  --output-dir runs/customer_jobs_db_batch
+```
+
+Output se duoc sap xep thanh:
+
+- `jobs/<job_id>/summary.json`
+- `jobs/<job_id>/job.log`
+- `jobs/<job_id>/aois/<aoi_id>/periods/<period_id>/output/...`
+- `jobs/<job_id>/aois/<aoi_id>/periods/<period_id>/debug/...` neu bat `--save-debug-data`
+
+Chi tiet layout runtime da chot tai:
+
+- `docs/runtime_storage_layout.md`
+
+## 3. Chon AOI nao de test
+
+Bo AOI suite khuyen nghi nam tai:
+
+- `docs/geojson_scan/representative_aoi_suite.md`
+- `docs/geojson_scan/componentized_aoi_suite.md`
+- `geojson/generated_aoi/`
+
+AOI nen uu tien:
+
+- `geojson/generated_aoi/aoi_suite_hanoi_urban_square.geojson`
+  - baseline GEE representative-month
+- `geojson/generated_aoi/aoi_suite_hanoi_river_strip.geojson`
+  - test geometry coverage khi AOI mong va bbox rong
+- `geojson/generated_aoi/aoi_suite_hanoi_dual_patch_multipolygon.geojson`
+  - test multipolygon/disjoint AOI
+- `geojson/generated_aoi/aoi_suite_redriver_delta_agri_water.geojson`
+  - test domain dong bang + kenh rach + nong nghiep
+- `geojson/generated_aoi/aoi_suite_central_highlands_rugged.geojson`
+  - test dia hinh rugged
+- `geojson/generated_aoi/aoi_suite_phuquoc_coastal_waterfront.geojson`
+  - test bien + waterfront
+- `geojson/generated_aoi/aoi_suite_baria_coastal_mixed.geojson`
+  - test coastal mixed
+
+Neu ban can test optional child-AOI mode (`trainlike.componentize_seed_intersections = true`), uu tien bo suite rieng:
+
+- `geojson/generated_aoi/aoi_component_hanoi_baseline_square.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_river_strip.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_polygon_with_hole.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_bridge_dumbbell.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_l_shape.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_dual_patch_multipolygon.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_tiny_control.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_corner_split_large_parent.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_nested_large_partial_small_full.geojson`
+- `geojson/generated_aoi/aoi_component_hanoi_near_full_tolerance.geojson`
+
+Tai lieu validation phu hop:
+
+- `docs/componentized_pipeline_validation.md`
+- `docs/geojson_scan/componentized_aoi_suite_smoke_false.md`
+- `docs/geojson_scan/componentized_aoi_suite_smoke_true.md`
+- `docs/geojson_scan/componentized_aoi_suite_contract_validation_false.md`
+- `docs/geojson_scan/componentized_aoi_suite_contract_validation_true.md`
+- `docs/geojson_scan/componentized_aoi_suite_mode_comparison.md`
+
+Neu can san live `>1 child component`, dung them bo AOI boundary-focused:
+
+- `docs/geojson_scan/componentized_boundary_search_suite.md`
+- `tools/run_componentized_boundary_search.py`
+
+Neu can mot phuong phap tot hon de tim AOI co kha nang ra live multi-child, uu tien tool data-driven:
+
+- `tools/search_componentized_grid_aois.py`
+- `docs/geojson_scan/componentized_grid_search_results.md` sau khi chay tool
+
+Khac biet:
+
+- `run_componentized_boundary_search.py` = thu vai AOI bien/strip co dinh
+- `search_componentized_grid_aois.py` = query footprint 1 lan tren khung rong, sweep nhieu AOI ung vien, xep hang bang chinh logic componentized hien tai
+
+Lenh mau:
+
+```bash
+python tools/search_componentized_grid_aois.py \
   --config config/pipeline_config.yaml \
   --datetime 2025-01-01/2025-12-31 \
-  --output-dir runs/customer_jobs \
-  --cache-staging
+  --gee-project downloads1correspondings2sgdm \
+  --center-lon 105.896132 \
+  --center-lat 21.019822 \
+  --search-width-m 18000 \
+  --search-height-m 18000 \
+  --candidate-sizes 3000x3000,5000x5000,8000x3000,3000x8000 \
+  --step-m 3000 \
+  --compound-from-top 16 \
+  --compound-max-pairs 48 \
+  --compound-min-separation-m 4500 \
+  --report-json docs/geojson_scan/componentized_grid_search_results.json \
+  --report-md docs/geojson_scan/componentized_grid_search_results.md \
+  --output-geojson-dir geojson/generated_aoi/grid_search_candidates
 ```
 
-với:
-- `mode = stac_trainlike_composite`
-- `window_before_days = 30`
-- `window_after_days = 30`
-- `min_scenes_per_window = 1`
-- `same_orbit_direction = false`
+## 4. Workflow hien tai thuc su chay nhu the nao
 
-**11. Khi nào nên đổi tham số**
-- Muốn dữ liệu “mới nhất tuyệt đối”: giữ `same_orbit_direction = false`
-- Muốn đồng nhất hình học hơn: bật `--same-orbit-direction`
-- STAC rất dày và bạn muốn tránh window quá nghèo: tăng `--min-scenes-per-window`
-- Muốn support pair không quá xa nhau: giảm `--max-delta-days`
-- Muốn broaden candidate mới nhất: tăng rộng `--datetime`
+Trong production default `gee_trainlike_composite`:
 
-Nếu bạn muốn, mình có thể làm tiếp một phần rất hữu ích:
-1. viết sẵn 3 command template cho `production`, `strict newest`, và `same-orbit`
-2. hoặc thêm một `docs/how_to_run_pipeline.md` riêng, gọn kiểu runbook để bạn dùng trực tiếp cho vận hành.
+1. doc AOI geometry that tu GeoJSON
+2. repair geometry neu can, tinh lai bbox canonical tu geometry
+3. query Sentinel-1 theo AOI + `datetime`
+4. chia `datetime` thanh tung `calendar month`
+5. voi moi thang:
+   - `anchor = midpoint that cua thang`
+   - `pre/S1T2 = [period_start, anchor)`
+   - `post/S1T1 = [anchor, period_end)`
+6. chon scene pools bang in-period relaxation ladder
+7. median composite theo `VV` va `VH`
+8. ap `focal_median` neu radius > 0
+9. export/align ve `EPSG:3857`, `10m`
+10. infer SR voi `model(S1T1=later/post, S1T2=earlier/pre)`
 
-**12. Chạy bằng Docker (đã build image `issm-sar-pipeline:latest`)**
+Moi thang sinh toi da 1 anh SR.
 
-Image hiện có:
-- `ENTRYPOINT ["python", "sar_pipeline.py"]`
-- `WORKDIR /app`
+Neu bat:
 
-Vì vậy khi chạy `docker run`, bạn chỉ cần truyền các args của `sar_pipeline.py`.
+- `trainlike.componentize_seed_intersections = true`
 
-Mount khuyến nghị:
-- `geojson` (read-only)
-- `config` (read-only)
-- `weights` (read-only)
-- `runs/customer_jobs` (read-write)
-- `.env` (read-only) nếu cần S3/STAC auth
+thi representative-month khong con ep `1 period -> 1 output` nua. Thay vao do:
 
-Lệnh production khuyến nghị (GPU):
+1. voi moi item `X` trong period, tao `R_X = AOI ∩ footprint(X)`
+2. tim tat ca item pre/post phu `R_X`
+3. neu `auto_relax_inside_period = true`, child candidate gate chi can moi ben co it nhat `1` scene de di tiep vao relaxation ladder; neu `auto_relax_inside_period = false`, no moi dung `min_scenes_per_half` ngay tai buoc candidate
+4. child AOI nay se duoc composite va infer rieng
+5. neu `R_Y` chua tron `R_X` va `R_Y` hop le, thi `R_X` bi suppress de tranh tao output long nhau
+6. parent period khong merge child outputs; no chi gom metadata va danh sach child outputs
+
+Luu y thuc te theo bo validation hien tai:
+
+- live GEE suite da xac nhan child-output artifacts (`SR`, `valid mask`, `component geometry`) ton tai day du
+- nhung trong bo month/AOI da chay, footprint GEE van phu tron parent AOI, nen live smoke chua sinh `>1 child output`
+- cac nhanh multi-child, overlap, containment suppression hien dang duoc khoa bang unit/synthetic tests trong `docs/componentized_pipeline_validation.md`
+
+## 5. Y nghia cac tham so CLI quan trong
+
+### 5.1 `--geojson`
+
+- bat buoc
+- AOI geometry that se duoc doc tu file nay
+- bbox top-level trong GeoJSON neu sai se khong duoc tin tuong lam source of truth
+
+Neu khong muon truyen file tay, co the dung 1 trong 2 flag DB o ben duoi.
+
+### 5.2 `--config`
+
+- file config goc
+- mac dinh: `config/pipeline_config.yaml`
+
+### 5.3 `--mode`
+
+Gia tri hop le:
+
+- `gee_trainlike_composite`
+- `stac_trainlike_composite`
+- `exact_pair`
+
+Y nghia:
+
+- `gee_trainlike_composite`
+  - production default hien tai
+  - chi ho tro `trainlike.selection_strategy = representative_calendar_period`
+- `stac_trainlike_composite`
+  - ho tro ca 2 nhanh:
+    - representative-month moi
+    - legacy anchor-driven train-like neu `selection_strategy` khong phai `representative_calendar_period`
+- `exact_pair`
+  - debug/benchmark single-scene
+
+### 5.4 `--datetime`
+
+- override `stac.datetime` va `gee.datetime`
+- neu bo trong `--datetime`, representative-month mode se tu dong chon **thang da ket thuc gan nhat**
+  - mac dinh hien tai:
+    - `trainlike.auto_datetime_strategy = previous_full_month`
+    - `trainlike.auto_datetime_months_back = 1`
+    - `trainlike.auto_datetime_timezone = Asia/Ho_Chi_Minh`
+- co the truyen ro `--datetime auto` neu muon noi thang la dung auto mode
+- neu muon backfill / chay lai thang bat ky, van co the truyen range huu han theo kieu:
+  - `2025-01-01/2025-01-31`
+  - `2025-01-01/2025-12-31`
+- neu `allow_partial_periods = false`, pipeline chi giu cac thang day du trong range
+
+Vi du:
+
+- Khong truyen `--datetime`
+  - neu chay vao dau thang 02 theo lich van hanh, pipeline se auto chon thang `01`
+- `--datetime auto`
+  - giong cach tren, nhung ro y hon khi viet script
+- `2025-01-01/2025-12-31`
+  - tao 12 thang day du
+- `2025-01-15/2025-12-31`
+  - thang 1 co the bi bo qua neu khong cho phep partial period
+
+CLI co them 2 override phu neu can:
+
+- `--auto-datetime-months-back`
+  - vi du `2` de chay lui ve thang da ket thuc truoc nua
+- `--auto-datetime-timezone`
+  - doi timezone de xac dinh "thang da ket thuc gan nhat"
+
+### 5.5 `--target-month`
+
+- day la shortcut de backfill mot thang cu the ma khong can tu viet range
+- format:
+  - `YYYY-MM`
+- vi du:
+  - `--target-month 2025-01`
+- pipeline se tu doi thanh range canonical:
+  - `2025-01-01T00:00:00Z/2025-02-01T00:00:00Z`
+
+Luu y:
+
+- khong dung cung luc `--datetime` va `--target-month`
+- `--target-month` se uu tien hon auto mode
+- GEE va STAC deu dung chung rule nay
+### 5.6 `--min-aoi-coverage`
+
+- day la nguong `AOI geometry coverage`
+- cong thuc:
+  - `coverage = area(intersection(AOI_geometry, item_geometry)) / area(AOI_geometry)`
+- hard gate hien tai la:
+  - `coverage > threshold`
+- default config la `0.0`
+
+Y nghia thuc te:
+
+- `0.0`
+  - chi can item giao AOI that su
+- `0.2`
+  - item phai phu hon 20% dien tich AOI geometry
+
+Luu y:
+
+- day khong phai bbox coverage
+- `aoi_bbox_coverage_*` chi la diagnostic, khong con la hard filter
+
+### 5.7 `--same-orbit-direction`
+
+Tac dung:
+
+- exact pair: 2 item phai cung `orbit_state`
+- representative-month: bo level `mixed_orbit_allowed` trong relaxation ladder
+
+Neu bat flag nay, pipeline nghiem khac hon. No giup giam drift do mixed orbit, nhung cung de lam tang so thang bi skip.
+
+### 5.8 `--representative-pool-mode`
+
+Chi ap dung cho `representative_calendar_period`.
+
+Gia tri hop le:
+
+- `auto`
+  - giu nguyen relaxation ladder hien tai
+  - uu tien pool cung orbit, chi roi sang mixed neu can
+- `orbit_only`
+  - chi cho phep cac pool theo orbit signature
+  - khong bao gio roi sang mixed-orbit pool
+- `mixed`
+  - ep dung 1 pool `pre/post` chung, khong tach theo orbit
+  - phu hop khi muon composite tat ca scene hop le trong nua dau / nua sau cua thang
+
+Vi du:
 
 ```bash
-docker run --rm -it --gpus all \
-  --env-file .env \
-  -v "$(pwd)/geojson:/app/geojson:ro" \
-  -v "$(pwd)/config:/app/config:ro" \
-  -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/runs/customer_jobs:/app/runs/customer_jobs" \
-  issm-sar-pipeline:latest \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --config config/pipeline_config.yaml \
-  --datetime 2025-07-01/2025-09-10 \
-  --output-dir runs/customer_jobs \
-  --cache-staging \
-  --device cuda
+python sar_pipeline.py \
+  --db-aoi-id ffa6dc6b-06f7-4af2-bb95-af5438bdfba2 \
+  --mode stac_trainlike_composite \
+  --target-month 2026-01 \
+  --representative-pool-mode mixed
 ```
 
-Lệnh production khuyến nghị (CPU):
+### 5.9 `--target-crs`
 
-```bash
-docker run --rm -it \
-  --env-file .env \
-  -v "$(pwd)/geojson:/app/geojson:ro" \
-  -v "$(pwd)/config:/app/config:ro" \
-  -v "$(pwd)/weights:/app/weights:ro" \
-  -v "$(pwd)/runs/customer_jobs:/app/runs/customer_jobs" \
-  issm-sar-pipeline:latest \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --config config/pipeline_config.yaml \
-  --datetime 2025-07-01/2025-09-10 \
-  --output-dir runs/customer_jobs \
-  --cache-staging \
-  --device cpu
+- override target CRS cho composite/export
+- hien khuyen nghi giu `EPSG:3857`
+
+### 5.10 `--target-resolution`
+
+- override pixel size theo met
+- default: `10.0`
+- neu GEE bi request-size limit, 2 cach xu ly thuc te la:
+  - thu nho AOI
+  - tang `target_resolution`
+
+### 5.11 `--focal-median-radius-m`
+
+- `0` -> tat focal
+- `>0` -> ap median filter theo ban kinh met sau buoc composite
+- default current config: `15.0`
+
+### 5.10 `--output-dir`
+
+- override root dir cho run outputs
+- voi DB mode:
+  - `--db-aoi-id` se dat outputs vao `<output-dir>/db_single_aoi/runs/...`
+  - `--db-all-active-aois` se dat outputs vao `<output-dir>/db_batch_<timestamp>/runs/...`
+
+### 5.11 `--db-aoi-id`
+
+- truy van 1 AOI tu `public.aois` theo `id`
+- chi chap nhan record co `status = 'ACTIVE'`
+- neu `geom` invalid, pipeline se fail som voi message ro rang
+- AOI truy van duoc se duoc materialize thanh GeoJSON tam truoc khi vao flow hien tai
+
+### 5.12 `--db-all-active-aois`
+
+- truy van tat ca AOI `ACTIVE`
+- chay tuan tu tung AOI hop le
+- AOI co `geom` invalid se bi skip va duoc ghi vao `summary.json`
+- day la mode phu hop cho scheduler/noi batch
+
+### 5.13 `--db-limit`
+
+- limit an toan cho `--db-all-active-aois`
+- rat nen dung khi smoke test hoac rollout lan dau
+- vi du:
+  - `--db-limit 2`
+
+### 5.14 `--db-env-path`
+
+- duong dan toi file `.env` chua `PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE`
+- mac dinh:
+  - `.env`
+
+## 6. Cau hinh componentized child AOI
+
+Nhung key moi duoi `trainlike`:
+
+- `componentize_seed_intersections`
+  - `false`: giu nguyen flow whole-AOI hien tai, moi period toi da 1 SR cho toan AOI
+  - `true`: chuyen sang mode `child infer + parent mosaic`
+    - pipeline tao candidate child region tu giao giua AOI va footprint item
+    - moi child hop le duoc chon `pre/post`, composite va infer doc lap
+    - output cuoi van la **1 cap VV/VH + 1 file JSON** cho parent AOI
+    - pixel nao khong co child hop le se la `nodata`
+- `component_parent_mosaic`
+  - `true`: sau khi infer tung child, ghep cac child output ve mot canvas cha theo bbox AOI
+  - hien tai day la delivery mode duoc khuyen nghi va da duoc smoke test
+- `component_item_min_coverage`
+  - nguong item phai phu bao nhieu phan tram cua `R_X`
+  - cong thuc:
+    - `area(intersection(item_geometry, R_X)) / area(R_X)`
+  - mac dinh hien tai la `0.99`
+  - nghia la item phai phu gan nhu toan bo `R_X` moi duoc nhan vao child do
+  - step nay chi loc item cho `R_X`, khong tao them region nho hon
+  - gia tri cao hon se nghiem khac hon, va co the lam vung lon fail nhung vung con seed rieng van song
+- `component_min_area_ratio`
+  - nguong dien tich toi thieu cua `R_X` so voi AOI cha
+  - dung de bo sliver/tiny child AOI
+
+Output representative-monthly whole-AOI hien tai:
+
+```text
+<job_dir>/
+  summary.json
+  job.log
+  aois/
+    <aoi_id>/
+      periods/
+        YYYY-MM/
+          output/
+            <item_id>.json
+            <item_id>_vv.tif
+            <item_id>_vh.tif
+          debug/   # optional, chi co khi bat --save-debug-data
+            window_raw/
+              pre/
+              post/
+            composite/
+              s1t1_period_YYYY-MM.tif
+              s1t2_period_YYYY-MM.tif
 ```
 
-Template tham số theo tình huống (giữ nguyên lệnh Docker, chỉ đổi phần args cuối):
+Y nghia:
 
-`strict newest` (ưu tiên mới nhất tuyệt đối):
+- `job.log` = file log duy nhat cua ca run
+- `*_vv.tif`, `*_vh.tif` = artifact uu tien de dua len he thong; moi file la 1-band COG
+- `<item_id>.json` = STAC Item-like JSON cho output SR; assets chi gom `sr_vv`, `sr_vh`; `S1T1/S1T2` nam trong properties/provenance
+- `input_aoi.geojson`, `*_valid_mask.tif`, `*_SR_x2.tif` khong duoc persist trong runtime tree nua
+- neu khong truyen, dung `output.root_dir` trong config
 
-```bash
---geojson geojson/<customer_aoi>.geojson \
---config config/pipeline_config.yaml \
---datetime 2025-01-01/2025-12-31 \
---output-dir runs/customer_jobs \
---cache-staging \
---device cuda
+Neu bat `componentize_seed_intersections=true` va `--save-debug-data`, layout period se mo rong them debug theo child:
+
+```text
+<job_dir>/
+  aois/
+    <aoi_id>/
+      periods/
+        YYYY-MM/
+          output/
+            <item_id>.json
+            <item_id>_vv.tif
+            <item_id>_vh.tif
+          debug/
+            components/
+              <child_id>/
+                window_raw/
+                  pre/
+                  post/
+                composite/
+                  s1t1_period_YYYY-MM__<child_id>.tif
+                  s1t2_period_YYYY-MM__<child_id>.tif
 ```
 
-`same-orbit` (đồng nhất quỹ đạo hơn):
+Y nghia them:
 
-```bash
---geojson geojson/<customer_aoi>.geojson \
---config config/pipeline_config.yaml \
---datetime 2025-01-01/2025-12-31 \
---same-orbit-direction \
---output-dir runs/customer_jobs \
---cache-staging \
---device cuda
-```
+- `debug/components/<child_id>/window_raw/` = raw subset da tai cho tung child duoc chon
+- `debug/components/<child_id>/composite/` = composite trung gian cua tung child
+- `output/` van chi giu **parent delivery artifacts**
+- khong persist child `VV/VH`, khong persist child `SR_x2`, khong persist valid-mask
+- mac dinh pipeline **khong** luu `debug/`; muon giu lai thi bat `--save-debug-data`
 
-`window chặt hơn` (muốn window có nhiều scene hơn):
+### 5.15 `--log-level`
 
-```bash
---geojson geojson/<customer_aoi>.geojson \
---config config/pipeline_config.yaml \
---datetime 2025-01-01/2025-12-31 \
---min-scenes-per-window 2 \
---output-dir runs/customer_jobs \
---cache-staging \
---device cuda
-```
+- ho tro: `DEBUG`, `INFO`, `WARNING`, `ERROR`
+- mac dinh: `INFO`
+- thu tu uu tien:
+  - `--log-level`
+  - `PIPELINE_LOG_LEVEL`
+  - `config.logging.level`
+  - fallback `INFO`
+- khi can debug `.env`, STAC query/fallback, S3 credential, S3 subset, nen dung:
+  - `--log-level DEBUG`
 
-Nếu hệ STAC/S3 dùng AWS profile thay vì `.env`, mount thêm:
+### 5.16 `--cache-staging`
 
-```bash
--v "$HOME/.aws:/root/.aws:ro"
-```
+- bat buoc giu lai aligned/staged inputs o cac workflow co staging local
+- huu ich cho QA, debug, visual inspection
+- voi GEE representative-month, run summary van ghi `cache_staging`, nhung workflow nay chu yeu ghi `composite` va `output` theo period; khong co y nghia giong exact pair local staging
 
-Lưu ý khi chạy Docker:
-- Không cần `conda activate`.
-- Đường dẫn trong args nên là path trong container (`/app/...`), ví dụ dùng `geojson/...`, `config/...`, `runs/...` như các lệnh ở trên.
-- Nếu máy không có GPU runtime của Docker/NVIDIA, bỏ `--gpus all` và đặt `--device cpu`.
+### 5.17 `--gee-project`
 
-**13. Ghi chú nhanh: tham số bắt buộc vs mặc định**
+- override `gee.project`
+- bat buoc cho GEE neu config khong co project hop le
 
-Nhóm **nhất định phải truyền** khi chạy (`python sar_pipeline.py` hoặc `docker run ...`):
-- `--geojson`
-  - Không có default ở CLI.
-  - Nếu thiếu sẽ lỗi ngay vì parser đang `required=True`.
+### 5.18 `--authenticate`
 
-Nhóm **đã set mặc định ngay ở CLI**:
-- `--config`
-  - default: `config/pipeline_config.yaml`
-- `--same-orbit-direction`
-  - default: `false` (chỉ bật khi bạn truyền flag)
-- `--auto-relax`
-  - default: `false` (chỉ bật khi bạn truyền flag)
-- `--cache-staging`
-  - default: `false` ở CLI (nhưng xem thêm mục dưới vì config có thể bật cache)
+- goi `ee.Authenticate()` khi can
+- chi can cho workflow GEE
 
-Nhóm **không có default ở CLI (`default=None`), nên sẽ lấy từ config**:
-- `--mode`
-  - mặc định từ config: `workflow.mode = stac_trainlike_composite`
-- `--datetime`
-  - mặc định từ config: `stac.datetime = null`
-  - nghĩa là thực tế bạn **nên truyền** để tránh query quá rộng/khó kiểm soát
-- `--min-delta-hours`
-  - mặc định từ config: `pairing.min_delta_hours = 24.0`
-- `--max-delta-days`
-  - mặc định từ config: `pairing.max_delta_days = 10`
-- `--min-aoi-coverage`
-  - mặc định từ config: `pairing.min_aoi_coverage = 1.0`
-- `--window-before-days`
-  - mặc định từ config: `trainlike.window_before_days = 30`
-- `--window-after-days`
-  - mặc định từ config: `trainlike.window_after_days = 30`
-- `--min-scenes-per-window`
-  - mặc định từ config: `trainlike.min_scenes_per_window = 1`
-- `--target-crs`
-  - mặc định từ config: `trainlike.target_crs = EPSG:3857`
-- `--target-resolution`
-  - mặc định từ config: `trainlike.target_resolution = 10.0`
-- `--focal-median-radius-m`
-  - mặc định từ config: `trainlike.focal_median_radius_m = 15.0`
-- `--device`
-  - mặc định từ infer config: `config/infer_config.yaml -> device = cuda`
-- `--output-dir`
-  - mặc định từ config: `output.root_dir = runs/pipeline`
+### 5.19 `--min-delta-hours`, `--max-delta-days`
 
-Ghi chú quan trọng:
-- `--cache-staging` là flag CLI (mặc định `false`), nhưng nếu `staging.cache_aligned_inputs = true` trong config thì pipeline vẫn cache.
-- Vì `stac.datetime` trong config đang `null`, để chạy production ổn định bạn nên luôn truyền `--datetime`.
+- day la nhom rang buoc thoi gian chinh cua `exact_pair`
+- chung cung duoc tai su dung boi mot so helper legacy/support-pair diagnostics
+- chung khong phai nhom tham so production trung tam cua representative-month hien tai
+
+### 5.20 `--auto-relax`
+
+- bat fallback `balanced/loose` cho exact-pair search
+- khong phai relaxation ladder cua representative-month
+- representative-month dung `trainlike.auto_relax_inside_period`, khong dung flag nay
+
+### 5.20 `--window-before-days`, `--window-after-days`, `--min-scenes-per-window`
+
+- chi co y nghia trong legacy STAC anchor-driven train-like flow
+- khong phai tham so production chinh cua representative-month
+- GEE representative-month hien tai khong dung bo tham so nay de chia thang
+
+### 5.21 `--device`
+
+- override device cho infer, vi du `cpu` hoac `cuda`
+- huu ich khi debug memory, benchmark toc do, hoac buoc phai chay tren CPU
+
+## 6. Tham so nao dang active, tham so nao la legacy
+
+### 6.1 Active cho representative-month hien tai
+
+Cac tham so quan trong thuc su tac dong trong production default:
+
+- `workflow.mode`
+- `pairing.min_aoi_coverage`
+- `pairing.same_orbit_direction` hoac `trainlike.same_orbit_direction`
+- `trainlike.selection_strategy`
+- `trainlike.period_mode`
+- `trainlike.period_boundary_policy`
+- `trainlike.period_split_policy`
+- `trainlike.allow_partial_periods`
+- `trainlike.min_scenes_per_half`
+- `trainlike.auto_relax_inside_period`
+- `trainlike.orbit_pass` (GEE)
+- `trainlike.clip_mode` (GEE)
+- `trainlike.target_crs`
+- `trainlike.target_resolution`
+- `trainlike.resampling` (STAC local composite)
+- `trainlike.focal_median_radius_m`
+- `gee.project`
+- `stac.datetime` / `gee.datetime`
+
+### 6.2 Legacy / khong phai tham so chinh cho representative-month
+
+Cac tham so sau van ton tai vi can cho legacy STAC anchor flow hoac tool benchmark/debug, nhung khong phai trung tam cua production recipe hien tai:
+
+- `trainlike.window_before_days`
+- `trainlike.window_after_days`
+- `trainlike.min_scenes_per_window`
+- `trainlike.auto_relax_min_scenes`
+- `trainlike.anchor_pick_index`
+- `trainlike.anchor_min_delta_hours`
+- `pairing.auto_relax`
+- `pairing.strict_slice`
+- `pairing.min_overlap`
+
+Y nghia:
+
+- chung van co tac dung o `exact_pair` hoac `stac_trainlike_composite` legacy anchor flow
+- nhung voi `gee_trainlike_composite` representative-month, day khong phai nhom tham so chinh can uu tien chinh sua
+
+### 6.3 Cac nhom config khac can hieu dung
+
+- `pairing.pols`
+  - end-to-end pipeline hien tai yeu cau `VV,VH`
+  - gia tri khac se bi tu choi som
+- `pairing.orbit`, `pairing.rel_orbit`
+  - filter/debug pre-selection cho item query
+  - khong phai nhom tham so production chinh
+- `stac.limit`
+  - gioi han so item query tu STAC
+  - tac dong den inventory duoc nhin thay trong STAC path
+- `compatibility.trained_input_profile`
+  - profile ma model duoc train tren do
+- `compatibility.current_download_profile`
+  - profile cua du lieu dang tai
+- `compatibility.allow_domain_mismatch`
+  - neu `false`, pipeline co the fail som de tranh chay voi domain sai
+- `inference.config_path`
+  - file infer config ma pipeline nap truoc khi goi inferencer
+- `output.root_dir`
+  - thu muc root mac dinh cua tat ca run
+- `staging.cache_aligned_inputs`
+  - co y nghia ro nhat o exact-pair/local STAC paths
+  - dung de giu input da align cho QA/debug
+
+## 7. Relaxation ladder trong representative-month
+
+Thu tu pipeline thu la:
+
+1. `same_orbit_state_and_relative_orbit`
+   - cung `orbit_state`
+   - cung `relative_orbit`
+   - moi nua thang can it nhat `max(2, min_scenes_per_half)` scene
+2. `same_orbit_state_only`
+   - cung `orbit_state`
+   - bo rang buoc `relative_orbit`
+   - moi nua thang can it nhat `max(2, min_scenes_per_half)` scene
+3. `same_orbit_state_one_scene_min`
+   - cung `orbit_state`
+   - moi nua thang can it nhat 1 scene
+4. `mixed_orbit_allowed`
+   - cho phep mixed orbit
+   - moi nua thang can it nhat 1 scene
+
+Neu `same_orbit_direction = true`, level 4 se bi loai.
+
+## 8. Cac truong hop skip/fail pho bien
+
+Representative-month co the skip 1 period khi:
+
+- thang khong nam tron trong range, trong khi `allow_partial_periods = false`
+- khong co scene o nua dau thang
+- khong co scene o nua sau thang
+- co scene nhung khong level nao trong ladder hop le
+- child mode khong con child nao song sau candidate gate, representative selection, va containment suppression
+
+Pipeline co the fail ca run khi:
+
+- AOI GeoJSON khong ton tai
+- AOI geometry hong va khong repair duoc
+- `datetime` khong huu han cho representative-month
+- GEE project thieu / Earth Engine chua init duoc
+- AOI qua lon vuot GEE download limit
+- composite all-NaN
+- thieu dependency infer
+
+Can chot ro:
+
+- `skip` = business outcome hop le, khong phai technical crash
+- `fail` = loi ky thuat that su
+
+## 9. Cach doc summary cho dung
+
+`jobs/<job_id>/summary.json` cho biet:
+
+- workflow dang chay
+- source AOI la DB hay file
+- config da resolve
+- tong so AOI trong job
+- status tong hop cua job
+- danh sach AOI va period long ben trong
+
+Trong `summary.json -> aois[]`, moi AOI cho biet:
+
+- `aoi_id`
+- source ref cua AOI
+- final status cua AOI
+- compatibility
+- period counts
+
+Trong `summary.json -> aois[].periods[]`, moi period cho biet:
+
+- period start/end/anchor
+- relaxation level nao duoc chon
+- pre/post scene counts
+- union coverage diagnostics
+- witness support pair nao duoc chon
+- output JSON/VV/VH cua period do
+- thong tin child-component neu bat componentized mode
+
+Can phan biet:
+
+- `aoi_coverage_*`
+  - metric chinh, geometry-based
+- `aoi_bbox_coverage_*`
+  - chi de diagnostic/backward comparison
+- `witness_support_pair`
+  - chi dung cho provenance/QA, khong dung de sinh anchor trong representative-month
+
+## 10. Tai lieu nen doc tiep
+
+- `docs/sar_pipeline.md`
+- `docs/query_stac_download_module.md`
+- `docs/stac_only_pipeline.md`
+- `docs/t1_t2_semantics.md`
