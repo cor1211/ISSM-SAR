@@ -27,27 +27,13 @@ ISSM-SAR/
 ├── config/
 │   ├── pipeline_config_stac_runtime.yaml
 │   ├── pipeline_config_gee_runtime.yaml
-│   ├── infer_config.yaml
-│   └─ các YAML runtime / infer / training được track trên remote
+│   └─ infer_config.yaml
 ├── docker/
-│   └─ entrypoint và các thành phần hỗ trợ container runtime
+│   └── entrypoint.sh
 ├── docs/
-│   └─ tài liệu runtime, publish, module guide và các ghi chú tham khảo
 ├── src/
-│   └─ code model / dataset / Lightning cho training và eval
-├── tools/
-│   └─ utility scripts được track cho publish hoặc inventory workflow
-├── utils/
-│   └─ utility legacy / notebook / crop configs vẫn còn được track
-├── sar_pipeline.py
-│   └─ entrypoint pipeline runtime chính
-├── sr_workflow.py
-│   └─ wrapper one-shot `pipeline -> publish`
-├── sr_publish.py
-│   └─ preflight/publish SR item lên STAC/S3 đích
-├── query_stac_download.py
-│   └─ facade CLI/public API cho query STAC, filtering và download helper
-├── stac_support/
+├── tools/├── utils/├── stac_support/
+│   ├── __init__.py
 │   ├── stac_time_support.py
 │   ├── stac_item_support.py
 │   ├── stac_geometry_support.py
@@ -55,34 +41,43 @@ ISSM-SAR/
 │   ├── s3_download_support.py
 │   ├── stac_filter_support.py
 │   └── representative_selection_support.py
-│   └─ package helper cho datetime, item metadata, geometry, STAC/S3 IO và representative selection
-├── db_aoi_source.py
-│   └─ đọc AOI từ database và materialize thành GeoJSON tạm cho pipeline
+│   └─ package helper cho datetime, metadata, geometry, STAC/S3 IO và representative selection
 ├── pipeline_support/
+│   ├── __init__.py
 │   ├── json_support.py
 │   ├── contract_support.py
 │   ├── runtime_support.py
 │   ├── raster_support.py
 │   └── sr_packaging_support.py
 │   └─ package helper cho JSON, contract, runtime layout, raster/output và SR packaging
-├── pipeline_json_support.py
-│   └─ compatibility wrapper trỏ về `pipeline_support.json_support`
-├── pipeline_contract_support.py
-│   └─ compatibility wrapper trỏ về `pipeline_support.contract_support`
-├── pipeline_runtime_support.py
-│   └─ compatibility wrapper trỏ về `pipeline_support.runtime_support`
+├── sar_pipeline.py
+│   └─ entrypoint pipeline runtime chính (`AOI -> query -> preprocess -> inference -> package`)
+├── query_stac_download.py
+│   └─ facade CLI/public API cho query STAC, filter, pair/composite selection và download helper
+├── db_aoi_source.py
+│   └─ đọc AOI ACTIVE từ DB và materialize geojson tạm cho pipeline
+├── infer_production.py
+│   └─ inference runtime cho input multiband đã chuẩn hóa
+├── runtime_logging.py
+│   └─ logging helpers dùng chung cho runtime/CLI
 ├── runtime_env_overrides.py
 │   └─ map env var vào pipeline/infer config runtime
-├── runtime_logging.py
-│   └─ logging helpers dùng chung cho runtime
-├── infer_production.py
-│   └─ inference runtime cho cặp input multiband đã được chuẩn hóa
+├── sr_publish.py
+│   └─ preflight/publish SR item lên STAC/S3 đích
+├── sr_workflow.py
+│   └─ one-shot workflow `pipeline -> (optional) publish`
 ├── gee_compare_download.py
 │   └─ helper GEE dùng chung cho composite runtime
 ├── gee_trainlike_download.py
 │   └─ helper GEE representative-composite
-├── train.py / train_lightning.py / trainer*.py
-│   └─ entrypoint training còn được track trên remote
+├── inference.py
+│   └─ inference script legacy còn được track
+├── process_data.py
+│   └─ data processing script legacy còn được track
+├── train.py / train_lightning.py / trainer.py / trainer_2.py
+│   └─ entrypoints training còn được track trên remote
+├── requirements_runtime_stac.txt / requirements_runtime_local.txt / requirements_gee.txt / requirements.txt
+│   └─ các dependency profile theo nhu cầu runtime/local/gee/full-dev
 ├── Dockerfile
 │   └─ image runtime để chạy bằng Docker
 └── .env.example

@@ -24,9 +24,6 @@ COPY query_stac_download.py ./
 COPY stac_support/ stac_support/
 COPY infer_production.py ./
 COPY db_aoi_source.py ./
-COPY pipeline_json_support.py ./
-COPY pipeline_contract_support.py ./
-COPY pipeline_runtime_support.py ./
 COPY pipeline_support/ pipeline_support/
 COPY runtime_logging.py ./
 COPY runtime_env_overrides.py ./
@@ -56,9 +53,6 @@ import stac_support.stac_filter_support  # noqa: F401
 import stac_support.representative_selection_support  # noqa: F401
 import infer_production  # noqa: F401
 import db_aoi_source  # noqa: F401
-import pipeline_json_support  # noqa: F401
-import pipeline_contract_support  # noqa: F401
-import pipeline_runtime_support  # noqa: F401
 import pipeline_support.json_support  # noqa: F401
 import pipeline_support.contract_support  # noqa: F401
 import pipeline_support.runtime_support  # noqa: F401
