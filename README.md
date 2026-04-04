@@ -22,36 +22,39 @@ Core runtime hiện được tổ chức theo đúng 4 luồng chuẩn ở trên
 
 Các thư mục và file đáng quan tâm nhất khi vận hành repo này:
 
-- `config/`
-  - chứa các file cấu hình runtime, infer và các recipe YAML
-- `config/pipeline_config_stac_runtime.yaml`
-  - config chuẩn cho backend STAC
-- `config/pipeline_config_gee_runtime.yaml`
-  - config chuẩn cho backend GEE
-- `docker/`
-  - entrypoint và các thành phần hỗ trợ container runtime
-- `docs/`
-  - tài liệu vận hành, reference và các ghi chú phân tích
-- `src/`
-  - code training/architecture/data của model, không phải entrypoint runtime chính
-- `sar_pipeline.py`
-  - entrypoint pipeline runtime chính
-- `sr_workflow.py`
-  - wrapper one-shot `pipeline -> publish`
-- `sr_publish.py`
-  - preflight/publish SR item lên STAC/S3 đích
-- `query_stac_download.py`
-  - query STAC, lọc inventory và download AOI subset
-- `db_aoi_source.py`
-  - đọc AOI từ database và materialize thành GeoJSON tạm cho pipeline
-- `runtime_env_overrides.py`
-  - map env var vào pipeline/infer config runtime
-- `runtime_logging.py`
-  - logging helpers dùng chung cho runtime
-- `Dockerfile`
-  - image runtime để chạy bằng Docker
-- `.env.example`
-  - template env để khởi tạo `.env` local
+```
+ISSM-SAR/
+├── config/
+│   ├── pipeline_config_stac_runtime.yaml
+│   │   └─ config chuẩn cho backend STAC
+│   ├── pipeline_config_gee_runtime.yaml
+│   │   └─ config chuẩn cho backend GEE
+│   └─ chứa các file cấu hình runtime, infer và các recipe YAML
+├── docker/
+│   └─ entrypoint và các thành phần hỗ trợ container runtime
+├── docs/
+│   └─ tài liệu vận hành, reference và các ghi chú phân tích
+├── src/
+│   └─ code training/architecture/data của model, không phải entrypoint runtime chính
+├── sar_pipeline.py
+│   └─ entrypoint pipeline runtime chính
+├── sr_workflow.py
+│   └─ wrapper one-shot `pipeline -> publish`
+├── sr_publish.py
+│   └─ preflight/publish SR item lên STAC/S3 đích
+├── query_stac_download.py
+│   └─ query STAC, lọc inventory và download AOI subset
+├── db_aoi_source.py
+│   └─ đọc AOI từ database và materialize thành GeoJSON tạm cho pipeline
+├── runtime_env_overrides.py
+│   └─ map env var vào pipeline/infer config runtime
+├── runtime_logging.py
+│   └─ logging helpers dùng chung cho runtime
+├── Dockerfile
+│   └─ image runtime để chạy bằng Docker
+└── .env.example
+    └─ template env để khởi tạo `.env` local
+```
 
 ## 📘 Các File Requirements
 
