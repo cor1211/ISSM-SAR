@@ -25,7 +25,7 @@ normalization:
 inference:
   patch_size: 128       # Input patch size (pixels)
   overlap: 0.25         # Fractional overlap between patches (0.0 - 0.5)
-  batch_size: 16        # Number of patches per GPU batch
+  batch_size: 8        # Number of patches per GPU batch
   use_amp: true         # Use torch.cuda.amp.autocast for FP16 inference
   gaussian_blend: true  # If true, use Gaussian window for blending. If false, use simple averaging.
 

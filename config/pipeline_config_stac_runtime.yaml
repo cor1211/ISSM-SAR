@@ -40,12 +40,12 @@ trainlike:
   auto_datetime_months_back: 1
   auto_datetime_timezone: Asia/Ho_Chi_Minh
   allow_partial_periods: false
-  min_scenes_per_half: 2
+  min_scenes_per_half: 1
   auto_relax_inside_period: true
-  representative_pool_mode: auto
+  representative_pool_mode: mixed
   componentize_seed_intersections: true
   component_parent_mosaic: true
-  component_item_min_coverage: 0.99
+  component_item_min_coverage: 1.0
   component_min_area_ratio: 0.0
   window_before_days: 30
   window_after_days: 30

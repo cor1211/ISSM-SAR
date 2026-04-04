@@ -52,9 +52,9 @@ class _TeeTextIO:
 
 @dataclass
 class WorkflowSettings:
-    publish_enabled: bool = False
-    publish_execute: bool = False
-    publish_overwrite: bool = False
+    publish_enabled: bool = True
+    publish_execute: bool = True
+    publish_overwrite: bool = True
     publish_timeout_seconds: int = 30
     publish_continue_on_error: bool = False
     fail_on_no_outputs: bool = False
@@ -151,9 +151,9 @@ def parse_workflow_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.
 def load_workflow_settings(args: argparse.Namespace, *, env: Optional[Mapping[str, str]] = None) -> WorkflowSettings:
     values = dict(os.environ if env is None else env)
     settings = WorkflowSettings(
-        publish_enabled=_parse_bool(values.get("WORKFLOW_PUBLISH_ENABLED"), default=False),
-        publish_execute=_parse_bool(values.get("WORKFLOW_PUBLISH_EXECUTE"), default=False),
-        publish_overwrite=_parse_bool(values.get("WORKFLOW_PUBLISH_OVERWRITE"), default=False),
+        publish_enabled=_parse_bool(values.get("WORKFLOW_PUBLISH_ENABLED"), default=True),
+        publish_execute=_parse_bool(values.get("WORKFLOW_PUBLISH_EXECUTE"), default=True),
+        publish_overwrite=_parse_bool(values.get("WORKFLOW_PUBLISH_OVERWRITE"), default=True),
         publish_timeout_seconds=_parse_int(values.get("WORKFLOW_PUBLISH_TIMEOUT_SECONDS"), default=30),
         publish_continue_on_error=_parse_bool(values.get("WORKFLOW_PUBLISH_CONTINUE_ON_ERROR"), default=False),
         fail_on_no_outputs=_parse_bool(values.get("WORKFLOW_FAIL_ON_NO_OUTPUTS"), default=False),

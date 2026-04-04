@@ -110,10 +110,10 @@ def build_effective_runtime_settings(
     return compact_jsonable(
         {
             "representative_pool_mode": normalize_representative_pool_mode(
-                train_cfg.get("representative_pool_mode", "auto")
+                train_cfg.get("representative_pool_mode", "mixed")
             ),
-            "min_scenes_per_half": int(train_cfg.get("min_scenes_per_half", 2)),
-            "component_item_min_coverage": float(train_cfg.get("component_item_min_coverage", 0.0)),
+            "min_scenes_per_half": int(train_cfg.get("min_scenes_per_half", 1)),
+            "component_item_min_coverage": float(train_cfg.get("component_item_min_coverage", 1.0)),
             "component_min_area_ratio": float(train_cfg.get("component_min_area_ratio", 0.0)),
             "save_debug_artifacts": bool(save_debug_artifacts),
             "infer_device": (infer_config or {}).get("device") if isinstance(infer_config, dict) else None,
@@ -2427,8 +2427,8 @@ def write_sr_output_geojson(
 
     item_id = _resolve_sr_item_id(summary, fallback=out_path)
     collection_name = _resolve_sr_collection_name(summary)
-    asset_href_mode = os.getenv("SR_ASSET_HREF_MODE", "local")
-    item_href_mode = os.getenv("SR_ITEM_SELF_MODE", "local")
+    asset_href_mode = os.getenv("SR_ASSET_HREF_MODE", "s3")
+    item_href_mode = os.getenv("SR_ITEM_SELF_MODE", "stac_api")
     include_local_source_paths = _env_flag("SR_INCLUDE_LOCAL_SOURCE_PATHS", default=False)
     whole_monthly_public = summary.get("period") is not None and summary.get("component") is None
     sr_vv_publish_name = f"{item_id}_vv.tif" if whole_monthly_public else Path(str(sr_vv_path)).name
@@ -2487,9 +2487,9 @@ def write_sr_output_geojson(
         "sr:method": "ISSM-SAR",
         "sr:model": "ISSM-SAR x2 dual-polarization",
         "sr:scale_factor": 2,
-        "sr:product_version": os.getenv("SR_PRODUCT_VERSION"),
-        "sr:publisher": os.getenv("SR_PUBLISHER"),
-        "sr:license": os.getenv("SR_LICENSE"),
+        "sr:product_version": os.getenv("SR_PRODUCT_VERSION", "v1"),
+        "sr:publisher": os.getenv("SR_PUBLISHER", "EOV"),
+        "sr:license": os.getenv("SR_LICENSE", "proprietary"),
     }
     if whole_monthly_public:
         properties: Dict[str, Any] = {
@@ -3618,13 +3618,13 @@ def run_stac_representative_calendar_pipeline(
         )
 
     allow_partial_periods = bool(train_cfg.get("allow_partial_periods", False))
-    min_scenes_per_half = int(train_cfg.get("min_scenes_per_half", 2))
+    min_scenes_per_half = int(train_cfg.get("min_scenes_per_half", 1))
     auto_relax_inside_period = bool(train_cfg.get("auto_relax_inside_period", True))
     same_orbit_direction = bool(train_cfg.get("same_orbit_direction", pair_cfg.get("same_orbit_direction", False)))
-    representative_pool_mode = normalize_representative_pool_mode(train_cfg.get("representative_pool_mode", "auto"))
+    representative_pool_mode = normalize_representative_pool_mode(train_cfg.get("representative_pool_mode", "mixed"))
     componentize_seed_intersections = bool(train_cfg.get("componentize_seed_intersections", False))
     component_parent_mosaic = bool(train_cfg.get("component_parent_mosaic", True))
-    component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 0.0))
+    component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 1.0))
     component_min_area_ratio = float(train_cfg.get("component_min_area_ratio", 0.0))
     save_debug_artifacts = save_debug_artifacts_enabled(config)
 
@@ -4780,13 +4780,13 @@ def run_gee_representative_calendar_pipeline(
         )
 
     allow_partial_periods = bool(train_cfg.get("allow_partial_periods", False))
-    min_scenes_per_half = int(train_cfg.get("min_scenes_per_half", 2))
+    min_scenes_per_half = int(train_cfg.get("min_scenes_per_half", 1))
     auto_relax_inside_period = bool(train_cfg.get("auto_relax_inside_period", True))
     same_orbit_direction = bool(train_cfg.get("same_orbit_direction", pair_cfg.get("same_orbit_direction", False)))
-    representative_pool_mode = normalize_representative_pool_mode(train_cfg.get("representative_pool_mode", "auto"))
+    representative_pool_mode = normalize_representative_pool_mode(train_cfg.get("representative_pool_mode", "mixed"))
     componentize_seed_intersections = bool(train_cfg.get("componentize_seed_intersections", False))
     component_parent_mosaic = bool(train_cfg.get("component_parent_mosaic", True))
-    component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 0.0))
+    component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 1.0))
     component_min_area_ratio = float(train_cfg.get("component_min_area_ratio", 0.0))
     save_debug_artifacts = save_debug_artifacts_enabled(config)
     target_crs = str(train_cfg.get("target_crs", "EPSG:3857"))
