@@ -10,6 +10,49 @@ Phạm vi khuyến nghị hiện tại:
 
 Các helper GEE cũ vẫn còn trong repo, nhưng không còn nằm trong đường cài đặt mặc định nữa.
 
+Ma trận runtime chuẩn hiện tại:
+- `stac + whole_aoi`
+- `stac + componentized_parent_mosaic`
+- `gee + whole_aoi`
+- `gee + componentized_parent_mosaic`
+
+Core runtime hiện được tổ chức theo đúng 4 luồng chuẩn ở trên; các mode cũ không còn nằm trên đường chạy chính nữa.
+
+## 🗂️ Cấu Trúc Thư Mục
+
+Các thư mục và file đáng quan tâm nhất khi vận hành repo này:
+
+- `config/`
+  - chứa các file cấu hình runtime, infer và các recipe YAML
+- `config/pipeline_config_stac_runtime.yaml`
+  - config chuẩn cho backend STAC
+- `config/pipeline_config_gee_runtime.yaml`
+  - config chuẩn cho backend GEE
+- `docker/`
+  - entrypoint và các thành phần hỗ trợ container runtime
+- `docs/`
+  - tài liệu vận hành, reference và các ghi chú phân tích
+- `src/`
+  - code training/architecture/data của model, không phải entrypoint runtime chính
+- `sar_pipeline.py`
+  - entrypoint pipeline runtime chính
+- `sr_workflow.py`
+  - wrapper one-shot `pipeline -> publish`
+- `sr_publish.py`
+  - preflight/publish SR item lên STAC/S3 đích
+- `query_stac_download.py`
+  - query STAC, lọc inventory và download AOI subset
+- `db_aoi_source.py`
+  - đọc AOI từ database và materialize thành GeoJSON tạm cho pipeline
+- `runtime_env_overrides.py`
+  - map env var vào pipeline/infer config runtime
+- `runtime_logging.py`
+  - logging helpers dùng chung cho runtime
+- `Dockerfile`
+  - image runtime để chạy bằng Docker
+- `.env.example`
+  - template env để khởi tạo `.env` local
+
 ## 📘 Các File Requirements
 
 Chọn file nhỏ nhất đúng với nhu cầu của bạn:
@@ -83,6 +126,22 @@ python sar_pipeline.py \
   --target-month 2026-01
 ```
 
+Ví dụ chạy cùng recipe chuẩn nhưng với backend GEE:
+
+```bash
+python sar_pipeline.py \
+  --config config/pipeline_config_gee_runtime.yaml \
+  --db-aoi-id <AOI_UUID> \
+  --target-month 2026-01
+```
+
+Gợi ý:
+- `config/pipeline_config_stac_runtime.yaml` là config chuẩn cho backend STAC
+- `config/pipeline_config_gee_runtime.yaml` là config chuẩn cho backend GEE
+- `trainlike.componentize_seed_intersections=false` sẽ chuyển về `whole_aoi`
+- `trainlike.componentize_seed_intersections=true` giữ `componentized_parent_mosaic`
+- nên truyền `--config` tường minh thay vì dựa vào config mặc định cũ
+
 ### 4. Publish local
 
 Preflight:
@@ -145,15 +204,18 @@ docker run --rm -it \
   --target-month 2026-01
 ```
 
-Các cờ publish hay dùng trong `.env`:
+Nếu bạn không muốn publish khi chạy `workflow`, hãy set tường minh trong `.env`:
 
 ```env
 WORKFLOW_PUBLISH_ENABLED=false
 WORKFLOW_PUBLISH_EXECUTE=false
-WORKFLOW_PUBLISH_OVERWRITE=false
 ```
 
-Thứ tự an toàn nên đi:
+Lưu ý:
+- workflow defaults hiện không còn thiên về safe no-publish nữa
+- vì vậy nên set rõ các cờ publish trong `.env` thay vì dựa vào mặc định
+
+Thứ tự vận hành an toàn nên đi:
 1. `WORKFLOW_PUBLISH_ENABLED=false`
 2. `WORKFLOW_PUBLISH_ENABLED=true` và `WORKFLOW_PUBLISH_EXECUTE=false`
 3. `WORKFLOW_PUBLISH_ENABLED=true` và `WORKFLOW_PUBLISH_EXECUTE=true`
@@ -167,7 +229,9 @@ Thứ tự an toàn nên đi:
 - `sr_publish.py`
   - preflight và publish contract
 - `config/pipeline_config_stac_runtime.yaml`
-  - config runtime STAC mặc định
+  - config runtime chuẩn cho `stac + componentized_parent_mosaic`
+- `config/pipeline_config_gee_runtime.yaml`
+  - config runtime chuẩn cho `gee + componentized_parent_mosaic`
 - `.env`
   - cấu hình kết nối và tuning runtime
 
@@ -175,4 +239,5 @@ Thứ tự an toàn nên đi:
 
 - Docker hiện chỉ cài `requirements_runtime_stac.txt`
 - chạy local theo hướng STAC nên dùng `requirements_runtime_local.txt`
-- code GEE cũ vẫn còn trong repo, nhưng không còn là đường mặc định
+- code GEE vẫn được giữ như backend chuẩn song song
+- core runtime đã được thu gọn về ma trận canonical `backend + representative_calendar_period + spatial_strategy`

@@ -46,20 +46,13 @@ from query_stac_download import (
     DEFAULT_STAC_API,
     STACClient,
     S3Downloader,
-    build_manifest_for_pair,
     build_representative_period_manifest,
-    build_trainlike_anchor_manifest,
-    build_selected_pair_info,
     canonical_bbox_from_geometry,
-    collect_anchor_window_items,
     collect_items_with_filters,
     collect_items_covering_region,
     collect_period_half_items,
-    diagnose_no_pair,
-    download_manifest_pair,
     expand_month_periods,
     extract_item_info,
-    format_duration_human,
     geodesic_area_wgs84,
     build_seed_intersection_region_candidates,
     item_scene_key,
@@ -71,8 +64,6 @@ from query_stac_download import (
     parse_required_pols,
     select_representative_scene_pools,
     select_asset_href,
-    search_pairs_sorted,
-    suggest_trainlike_anchors,
 )
 from runtime_logging import (
     configure_root_logging,
@@ -89,6 +80,11 @@ ensure_root_logging(DEFAULT_LOG_LEVEL)
 logger = logging.getLogger("sar_pipeline")
 DEFAULT_MAX_RETRY_ATTEMPTS = 3
 AUTO_DATETIME_SENTINELS = {"", "auto", "latest_full_month", "previous_full_month", "auto_previous_full_month"}
+WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE = "stac_trainlike_composite"
+WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE = "gee_trainlike_composite"
+SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD = "representative_calendar_period"
+SPATIAL_STRATEGY_WHOLE_AOI = "whole_aoi"
+SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC = "componentized_parent_mosaic"
 
 
 def emit_pipeline_log(level: int, message: str, **fields: Any) -> None:
@@ -100,8 +96,82 @@ def emit_pipeline_stage(title: str, **fields: Any) -> None:
     emit_pipeline_log(logging.INFO, f"================ {normalized} ================", **fields)
 
 
+def normalize_workflow_mode(value: Any, *, default: str = "") -> str:
+    return str(value or default).strip().lower()
+
+
+def normalize_selection_strategy(
+    value: Any,
+    *,
+    default: str = SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD,
+) -> str:
+    return str(value or default).strip().lower()
+
+
+def is_representative_composite_workflow_mode(value: Any) -> bool:
+    normalized = normalize_workflow_mode(value, default="")
+    return normalized in {WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE, WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE}
+
+
+def is_canonical_selection_strategy(value: Any) -> bool:
+    return (
+        normalize_selection_strategy(
+            value,
+            default=SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD,
+        )
+        == SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD
+    )
+
+
+def resolve_workflow_backend(value: Any) -> Optional[str]:
+    normalized = normalize_workflow_mode(value, default="")
+    if normalized == WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE:
+        return "stac"
+    if normalized == WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE:
+        return "gee"
+    return None
+
+
+def resolve_spatial_strategy(train_cfg: Optional[Dict[str, Any]]) -> str:
+    cfg = train_cfg or {}
+    if bool(cfg.get("componentize_seed_intersections", False)):
+        return SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC
+    return SPATIAL_STRATEGY_WHOLE_AOI
+
+
+def describe_pipeline_profile(
+    *,
+    workflow_mode: Any,
+    train_cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized_workflow_mode = normalize_workflow_mode(workflow_mode, default="")
+    representative_composite = is_representative_composite_workflow_mode(normalized_workflow_mode)
+    selection_strategy = None
+    canonical_selection_strategy = False
+    if representative_composite:
+        normalized_selection = normalize_selection_strategy((train_cfg or {}).get("selection_strategy"), default="")
+        selection_strategy = normalized_selection or None
+        canonical_selection_strategy = is_canonical_selection_strategy(selection_strategy)
+    spatial_strategy = (
+        resolve_spatial_strategy(train_cfg)
+        if representative_composite and canonical_selection_strategy
+        else None
+    )
+    runtime_family = "representative_composite" if representative_composite else "unknown"
+    return compact_jsonable(
+        {
+            "workflow_backend": resolve_workflow_backend(normalized_workflow_mode),
+            "runtime_family": runtime_family,
+            "selection_strategy": selection_strategy,
+            "spatial_strategy": spatial_strategy,
+            "canonical_selection_strategy": canonical_selection_strategy if representative_composite else None,
+        }
+    )
+
+
 def build_effective_runtime_settings(
     *,
+    workflow_mode: Any = "",
     train_cfg: Dict[str, Any],
     infer_config: Optional[Dict[str, Any]],
     save_debug_artifacts: bool,
@@ -109,6 +179,7 @@ def build_effective_runtime_settings(
     infer_cfg = ((infer_config or {}).get("inference") or {}) if isinstance(infer_config, dict) else {}
     return compact_jsonable(
         {
+            **describe_pipeline_profile(workflow_mode=workflow_mode, train_cfg=train_cfg),
             "representative_pool_mode": normalize_representative_pool_mode(
                 train_cfg.get("representative_pool_mode", "mixed")
             ),
@@ -128,6 +199,7 @@ def build_effective_runtime_settings(
 
 def log_effective_runtime_settings(
     *,
+    workflow_mode: Any = "",
     train_cfg: Dict[str, Any],
     infer_config: Optional[Dict[str, Any]],
     save_debug_artifacts: bool,
@@ -135,6 +207,7 @@ def log_effective_runtime_settings(
     emit_pipeline_stage(
         "Effective Runtime Settings",
         **build_effective_runtime_settings(
+            workflow_mode=workflow_mode,
             train_cfg=train_cfg,
             infer_config=infer_config,
             save_debug_artifacts=save_debug_artifacts,
@@ -279,17 +352,6 @@ def log_inference_env_overrides(infer_config: Dict[str, Any]) -> None:
             target=override.get("target"),
             source=override.get("source"),
         )
-
-
-def exact_pair_semantics() -> Dict[str, Any]:
-    return {
-        "t1_label": "T1",
-        "t2_label": "T2",
-        "t1_role": "later/posterior exact scene",
-        "t2_role": "earlier/prior exact scene",
-        "matches_training_semantics": True,
-        "note": "Exact-pair mode now uses canonical model order T1=later and T2=earlier. This matches temporal input ordering, but the recipe is still exact single-scene rather than train-like composite.",
-    }
 
 
 def model_trainlike_semantics() -> Dict[str, Any]:
@@ -694,12 +756,10 @@ def prepare_storage_aoi_layout(job_layout: Dict[str, str], aoi_id: str) -> Dict[
 
 
 def infer_effective_input_profile(config: Dict[str, Any]) -> Optional[str]:
-    workflow_mode = str(config.get("workflow", {}).get("mode", "") or "").strip().lower()
-    if workflow_mode == "exact_pair":
-        return "stac_measurement_raw"
-    if workflow_mode == "stac_trainlike_composite":
+    workflow_mode = normalize_workflow_mode(config.get("workflow", {}).get("mode", ""), default="")
+    if workflow_mode == WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE:
         return "stac_trainlike_composite_db"
-    if workflow_mode == "gee_trainlike_composite":
+    if workflow_mode == WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE:
         return "gee_s1_db"
     compat_cfg = config.get("compatibility", {}) or {}
     current_profile = str(compat_cfg.get("current_download_profile", "") or "").strip()
@@ -2065,9 +2125,6 @@ def _join_url(base: str, *parts: str) -> str:
 
 
 def _infer_sr_collection_name(summary: Dict[str, Any]) -> str:
-    workflow_mode = str(summary.get("workflow_mode") or "sar_sr")
-    if workflow_mode == "exact_pair":
-        return "issm-sar-sr-x2-exact"
     if summary.get("period") is not None and summary.get("component") is not None:
         return "issm-sar-sr-x2-monthly-component"
     if summary.get("period") is not None:
@@ -2079,9 +2136,6 @@ def _infer_sr_collection_name(summary: Dict[str, Any]) -> str:
 
 def _resolve_sr_collection_name(summary: Dict[str, Any]) -> str:
     inferred = _infer_sr_collection_name(summary)
-    workflow_mode = str(summary.get("workflow_mode") or "sar_sr")
-    if workflow_mode == "exact_pair":
-        return os.getenv("SR_COLLECTION_ID_EXACT", inferred)
     if summary.get("period") is not None and summary.get("component") is not None:
         return os.getenv("SR_COLLECTION_ID_MONTHLY_COMPONENT", inferred)
     if summary.get("period") is not None:
@@ -2129,8 +2183,6 @@ def _summary_period_token(summary: Dict[str, Any]) -> Optional[str]:
         return summary["period"].get("period_id")
     if summary.get("anchor"):
         return summary["anchor"].get("anchor_date") or summary["anchor"].get("pair_id")
-    if summary.get("selected_pair"):
-        return summary["selected_pair"].get("pair_id")
     return None
 
 
@@ -2205,8 +2257,6 @@ def _resolve_sr_s3_prefix(summary: Dict[str, Any]) -> str:
         return os.getenv("SR_S3_PREFIX_MONTHLY", "issm-sar-sr-x2/monthly")
     if summary.get("anchor") is not None:
         return os.getenv("SR_S3_PREFIX_ANCHOR_WINDOW", "issm-sar-sr-x2/anchor-window")
-    if str(summary.get("workflow_mode") or "") == "exact_pair":
-        return os.getenv("SR_S3_PREFIX_EXACT", "issm-sar-sr-x2/exact")
     return os.getenv("SR_S3_PREFIX_DEFAULT", "issm-sar-sr-x2")
 
 
@@ -2418,13 +2468,6 @@ def write_sr_output_geojson(
             start_datetime = source_t2[0].get("datetime")
         if source_t1:
             end_datetime = source_t1[-1].get("datetime")
-    elif summary.get("selected_pair"):
-        selected_pair = summary["selected_pair"]
-        nominal_datetime = selected_pair.get("t1_datetime")
-        start_datetime = selected_pair.get("t2_datetime")
-        end_datetime = selected_pair.get("t1_datetime")
-        pair_id = selected_pair.get("pair_id")
-
     item_id = _resolve_sr_item_id(summary, fallback=out_path)
     collection_name = _resolve_sr_collection_name(summary)
     asset_href_mode = os.getenv("SR_ASSET_HREF_MODE", "s3")
@@ -2511,7 +2554,7 @@ def write_sr_output_geojson(
             "source:pair_id": pair_id,
             "source:aoi_id": _summary_aoi_id(summary),
             "source:aoi_geojson": str(Path(summary["aoi_geojson"]).resolve()) if include_local_source_paths and summary.get("aoi_geojson") else None,
-            "source:backend": "stac" if str(summary.get("workflow_mode", "")).startswith("stac") or summary.get("workflow_mode") == "exact_pair" else "gee",
+            "source:backend": resolve_workflow_backend(summary.get("workflow_mode")),
             "source:input_semantics": input_semantics,
             "source:s1t1_label": input_semantics.get("t1_label"),
             "source:s1t2_label": input_semantics.get("t2_label"),
@@ -2558,18 +2601,6 @@ def write_sr_output_geojson(
                 "source:component_seed_item_ids": component.get("seed_item_ids"),
             }
         )
-    if summary.get("selected_pair"):
-        selected_pair = summary["selected_pair"]
-        properties.update(
-            {
-                "source:exact_pair_id": selected_pair.get("pair_id"),
-                "source:exact_t1_id": selected_pair.get("t1_id"),
-                "source:exact_t2_id": selected_pair.get("t2_id"),
-                "source:exact_t1_datetime": selected_pair.get("t1_datetime"),
-                "source:exact_t2_datetime": selected_pair.get("t2_datetime"),
-            }
-        )
-
     links: List[Dict[str, Any]] = _resolve_sr_root_links(summary)
     links.append(
         {
@@ -3071,45 +3102,6 @@ def apply_focal_median_db(arr: np.ndarray, radius_m: float, resolution_m: float)
     return median_filter(arr.astype(np.float32), footprint=footprint, mode="nearest").astype(np.float32)
 
 
-def choose_anchor_candidate(
-    items: List[Dict[str, Any]],
-    aoi_bbox: List[float],
-    aoi_geometry: Dict[str, Any],
-    train_cfg: Dict[str, Any],
-    pair_cfg: Dict[str, Any],
-) -> Tuple[Dict[str, Any], int]:
-    """Choose the best anchor candidate, optionally relaxing scene-count requirements."""
-    min_scenes = int(train_cfg.get("min_scenes_per_window", 1))
-    auto_relax = bool(train_cfg.get("auto_relax_min_scenes", True))
-    before_days = float(train_cfg.get("window_before_days", 30.0))
-    after_days = float(train_cfg.get("window_after_days", 30.0))
-    same_orbit_direction = bool(train_cfg.get("same_orbit_direction", pair_cfg.get("same_orbit_direction", False)))
-    min_delta_hours = float(train_cfg.get("anchor_min_delta_hours", pair_cfg.get("min_delta_hours", 24.0)))
-
-    for required_count in range(min_scenes, 0, -1):
-        candidates = suggest_trainlike_anchors(
-            items=items,
-            aoi_bbox=aoi_bbox,
-            aoi_geometry=aoi_geometry,
-            window_before_days=before_days,
-            window_after_days=after_days,
-            min_aoi_coverage=float(pair_cfg.get("min_aoi_coverage", 0.0)),
-            min_delta_hours=min_delta_hours,
-            same_orbit_direction=same_orbit_direction,
-            min_scenes_per_window=required_count,
-        )
-        if candidates:
-            pick_index = max(1, int(train_cfg.get("anchor_pick_index", 1)))
-            pick_index = min(pick_index, len(candidates))
-            return candidates[pick_index - 1], required_count
-        if not auto_relax:
-            break
-    raise RuntimeError(
-        "No valid STAC anchor candidate found for the requested windows. "
-        "Try widening the STAC datetime search range or lowering min_scenes_per_window."
-    )
-
-
 def sanitize_scene_token(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value)
 
@@ -3259,119 +3251,6 @@ def build_query_namespace(config: Dict[str, Any], geojson_path: str) -> argparse
     )
 
 
-def select_best_pair(
-    client: STACClient,
-    config: Dict[str, Any],
-    geojson_path: str,
-) -> Tuple[List[Dict[str, Any]], List[float], Dict[str, Any], Dict[str, Any], str, Optional[Dict[str, Any]]]:
-    pair_cfg = config.get("pairing", {})
-    query_args = build_query_namespace(config, geojson_path)
-    required_pols = parse_required_pols(query_args.pols)
-    if required_pols != ["VV", "VH"]:
-        raise ValueError("Pipeline end-to-end currently requires pols=VV,VH.")
-
-    items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, query_args, required_pols)
-    strict_pairs = search_pairs_sorted(
-        items=items,
-        aoi_bbox=aoi_bbox,
-        aoi_geometry=aoi_geometry,
-        min_overlap=float(pair_cfg.get("min_overlap", 0.0)),
-        min_aoi_coverage=float(pair_cfg.get("min_aoi_coverage", 0.0)),
-        max_delta_days=int(pair_cfg.get("max_delta_days", 10)),
-        min_delta_hours=float(pair_cfg.get("min_delta_hours", 24.0)),
-        strict_slice=bool(pair_cfg.get("strict_slice", False)),
-        same_orbit_direction=bool(pair_cfg.get("same_orbit_direction", False)),
-    )
-    if strict_pairs:
-        return items, aoi_bbox, aoi_geometry, strict_pairs[0], "strict", None
-
-    diag = diagnose_no_pair(
-        items=items,
-        aoi_bbox=aoi_bbox,
-        aoi_geometry=aoi_geometry,
-        strict_slice=bool(pair_cfg.get("strict_slice", False)),
-        min_overlap=float(pair_cfg.get("min_overlap", 0.0)),
-        min_aoi_coverage=float(pair_cfg.get("min_aoi_coverage", 0.0)),
-        max_delta_days=int(pair_cfg.get("max_delta_days", 10)),
-        min_delta_hours=float(pair_cfg.get("min_delta_hours", 24.0)),
-        same_orbit_direction=bool(pair_cfg.get("same_orbit_direction", False)),
-    )
-
-    if not bool(pair_cfg.get("auto_relax", False)):
-        raise RuntimeError(
-            f"No valid strict pair found for {geojson_path}. reason={diag['reason']} item_count={diag['item_count']}"
-        )
-
-    relax_profiles = [
-        ("balanced", 30),
-        ("loose", 90),
-    ]
-    for profile_name, max_days in relax_profiles:
-        candidates = search_pairs_sorted(
-            items=items,
-            aoi_bbox=aoi_bbox,
-            aoi_geometry=aoi_geometry,
-            min_overlap=float(pair_cfg.get("min_overlap", 0.0)),
-            min_aoi_coverage=float(pair_cfg.get("min_aoi_coverage", 0.0)),
-            max_delta_days=max_days,
-            min_delta_hours=float(pair_cfg.get("min_delta_hours", 24.0)),
-            strict_slice=bool(pair_cfg.get("strict_slice", False)),
-            same_orbit_direction=bool(pair_cfg.get("same_orbit_direction", False)),
-        )
-        if candidates:
-            return items, aoi_bbox, aoi_geometry, candidates[0], profile_name, diag
-
-    raise RuntimeError(
-        f"No valid pair found for {geojson_path} after relax. reason={diag['reason']} item_count={diag['item_count']}"
-    )
-
-
-def expected_single_band_paths(
-    raw_dir: Path,
-    manifest: Dict[str, Any],
-    t1_prefix: str,
-    t2_prefix: str,
-) -> Dict[str, Path]:
-    pair_id = manifest["pair_id"]
-    return {
-        "t1_vv": raw_dir / f"{t1_prefix}{pair_id}_vv.tif",
-        "t1_vh": raw_dir / f"{t1_prefix}{pair_id}_vh.tif",
-        "t2_vv": raw_dir / f"{t2_prefix}{pair_id}_vv.tif",
-        "t2_vh": raw_dir / f"{t2_prefix}{pair_id}_vh.tif",
-    }
-
-
-def write_run_summary(run_dir: Path, summary: Dict[str, Any]) -> Tuple[Path, Optional[Path]]:
-    attach_run_log_path(summary)
-    summary["aoi_id"] = _summary_aoi_id(summary)
-    run_config = summary.setdefault("run_config", {})
-    if isinstance(run_config, dict):
-        run_config.setdefault("mode", summary.get("workflow_mode"))
-        run_config.setdefault("selection_strategy", summary.get("selection_strategy"))
-    json_path, md_path = aoi_summary_paths(run_dir)
-    summary["summary_json"] = str(json_path)
-    summary["summary_md"] = None
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(build_aoi_record(summary), f, indent=2, ensure_ascii=False)
-    return json_path, None
-
-
-def write_trainlike_run_summary(run_dir: Path, summary: Dict[str, Any]) -> Tuple[Path, Optional[Path]]:
-    """Write JSON summary for the train-like composite workflow."""
-    attach_run_log_path(summary)
-    summary["aoi_id"] = _summary_aoi_id(summary)
-    run_config = summary.setdefault("run_config", {})
-    if isinstance(run_config, dict):
-        run_config.setdefault("mode", summary.get("workflow_mode"))
-        run_config.setdefault("selection_strategy", summary.get("selection_strategy"))
-    json_path, md_path = aoi_summary_paths(run_dir)
-    summary["summary_json"] = str(json_path)
-    summary["summary_md"] = None
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(build_aoi_record(summary), f, indent=2, ensure_ascii=False)
-    return json_path, None
-
-
 def write_representative_period_summary(period_dir: Path, summary: Dict[str, Any]) -> Tuple[Path, Optional[Path]]:
     """Write JSON summary for one representative calendar period."""
     json_path, _ = period_summary_paths(period_dir)
@@ -3415,166 +3294,26 @@ def write_representative_job_summary(run_dir: Path, summary: Dict[str, Any]) -> 
     return json_path, None
 
 
-def run_exact_pair_pipeline(config: Dict[str, Any], geojson_path: str, output_root: Optional[str], cache_staging: bool, device: Optional[str]) -> Dict[str, Any]:
-    try:
-        from infer_production import SARInferencer
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Inference dependencies are missing. Please install the production inference environment before running sar_pipeline.py."
-        ) from exc
+def run_stac_representative_whole_aoi_pipeline(
+    config: Dict[str, Any],
+    geojson_path: str,
+    output_root: Optional[str],
+    cache_staging: bool,
+    device: Optional[str],
+) -> Dict[str, Any]:
+    """Canonical STAC representative pipeline for the whole-AOI spatial strategy."""
+    return run_stac_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
 
-    aoi_path = Path(geojson_path)
-    if not aoi_path.exists():
-        raise FileNotFoundError(f"AOI GeoJSON not found: {aoi_path}")
-    aoi_id = resolve_runtime_aoi_id(config, aoi_path)
 
-    stac_cfg = config.get("stac", {})
-    pair_cfg = config.get("pairing", {})
-    dl_cfg = config.get("download", {})
-    staging_cfg = config.get("staging", {})
-    infer_cfg = config.get("inference", {})
-    out_cfg = config.get("output", {})
-    compatibility_info = check_domain_compatibility(config, current_profile_override="stac_measurement_raw")
-    save_debug_artifacts = save_debug_artifacts_enabled(config)
-
-    required_pols = parse_required_pols(pair_cfg.get("pols", "VV,VH"))
-    if required_pols != ["VV", "VH"]:
-        raise ValueError("Pipeline end-to-end currently requires pols=VV,VH.")
-
-    run_root = ensure_dir(output_root or out_cfg.get("root_dir", "runs/pipeline"))
-    run_dir = resolve_pipeline_run_dir(config, run_root, aoi_id)
-    staging_dir = intermediate_dir(run_dir) / staging_cfg.get("dir_name", "staging")
-    output_dir = ensure_dir(Path(run_dir) / out_cfg.get("output_dir_name", "output"))
-
-    client = STACClient(stac_cfg.get("url", DEFAULT_STAC_API))
-    items, aoi_bbox, aoi_geometry, chosen_pair, selected_profile, diag = select_best_pair(client, config, str(aoi_path))
-    manifest = build_manifest_for_pair(chosen_pair, required_pols)
-    if manifest is None:
-        raise RuntimeError("Selected pair is missing required VV/VH asset hrefs.")
-    manifest["selection_profile"] = selected_profile
-    manifest["aoi_geojson"] = str(aoi_path)
-    manifest["aoi_bbox"] = aoi_bbox
-
-    manifest_path = aoi_manifest_path(run_dir)
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
-
-    infer_config = load_yaml(infer_cfg.get("config_path", "config/infer_config.yaml"))
-    infer_overrides = apply_inference_env_overrides(infer_config)
-    if infer_overrides:
-        infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
-        log_inference_env_overrides(infer_config)
-    if device:
-        infer_config["device"] = device
-
-    cache_enabled = cache_staging or bool(staging_cfg.get("cache_aligned_inputs", False))
-    inferencer = SARInferencer(infer_config)
-    with tempfile.TemporaryDirectory(prefix="sr_exact_pair_") as transient_dir:
-        transient_root = Path(transient_dir)
-        raw_dir = ensure_dir(inputs_dir(run_dir) / dl_cfg.get("raw_dir_name", "raw"))
-        downloaded_paths = download_manifest_pair(
-            manifest=manifest,
-            required_pols=required_pols,
-            out_dir=str(raw_dir),
-            t1_prefix=dl_cfg.get("t1_prefix", "s1t1_"),
-            t2_prefix=dl_cfg.get("t2_prefix", "s1t2_"),
-            subset_aoi=not bool(dl_cfg.get("full_item", False)),
-            aoi_geometry=aoi_geometry,
-        )
-        if len(downloaded_paths) != 4:
-            raise RuntimeError(f"Expected 4 downloaded files, got {len(downloaded_paths)}")
-
-        expected = expected_single_band_paths(
-            raw_dir,
-            manifest,
-            dl_cfg.get("t1_prefix", "s1t1_"),
-            dl_cfg.get("t2_prefix", "s1t2_"),
-        )
-        missing = [str(path) for path in expected.values() if not path.exists()]
-        if missing:
-            raise RuntimeError(f"Missing expected raw single-band files: {missing}")
-        transient_output_tif = Path(transient_dir) / f"{aoi_id}__{manifest['pair_id']}_SR_x2.tif"
-        inferencer.run_pair_from_single_band_files(
-            t1_vv=expected["t1_vv"],
-            t1_vh=expected["t1_vh"],
-            t2_vv=expected["t2_vv"],
-            t2_vh=expected["t2_vh"],
-            out_path=transient_output_tif,
-            config={
-                "resampling": staging_cfg.get("resampling", "bilinear"),
-                "target_crs": staging_cfg.get("target_crs"),
-                "target_resolution": staging_cfg.get("target_resolution"),
-                **exact_pair_semantics(),
-            },
-            cache_dir=staging_dir if cache_enabled else None,
-            identifier=manifest["pair_id"],
-        )
-        packaged_outputs = export_masked_sr_band_cogs(
-            sr_multiband_path=transient_output_tif,
-            output_dir=output_dir,
-            output_basename=f"{aoi_id}__{manifest['pair_id']}",
-            geometry_wgs84=aoi_geometry,
-            compression=infer_config.get("output", {}).get("compression", "DEFLATE"),
-            blocksize=int(infer_config.get("output", {}).get("blockxsize", 512)),
-            persist_valid_mask=False,
-            final_target_crs=out_cfg.get("final_target_crs"),
-            final_target_resolution=out_cfg.get("final_target_resolution"),
-            final_resampling_name=str(out_cfg.get("final_resampling", "bilinear")),
-        )
-
-    selected_pair_info = build_selected_pair_info(chosen_pair, manifest)
-    summary = {
-        "workflow_mode": "exact_pair",
-        "aoi_geojson": resolve_aoi_source_ref(config, aoi_path),
-        "run_dir": str(run_dir),
-        "raw_dir": str(raw_dir),
-        "staging_dir": str(staging_dir if cache_enabled else ""),
-        "output_tif": None,
-        "output_sr_vv_tif": packaged_outputs["output_sr_vv_tif"],
-        "output_sr_vh_tif": packaged_outputs["output_sr_vh_tif"],
-        "output_sr_band_tifs": packaged_outputs["output_sr_band_tifs"],
-        "output_valid_mask_path": packaged_outputs["output_valid_mask_path"],
-        "selection_profile": selected_profile,
-        "selected_pair": selected_pair_info,
-        "inference_input_semantics": exact_pair_semantics(),
-        "manifest_path": str(manifest_path),
-        "downloaded_files": [str(p) for p in downloaded_paths],
-        "items_after_hard_filter": len(items),
-        "run_config": {
-            "stac_url": stac_cfg.get("url", DEFAULT_STAC_API),
-            "collection": stac_cfg.get("collection", DEFAULT_COLLECTION),
-            "datetime": stac_cfg.get("datetime"),
-            "limit": int(stac_cfg.get("limit", 300)),
-            "min_aoi_coverage": float(pair_cfg.get("min_aoi_coverage", 0.0)),
-            "min_delta_hours": float(pair_cfg.get("min_delta_hours", 24.0)),
-            "max_delta_days": int(pair_cfg.get("max_delta_days", 10)),
-            "selection_priority": "latest_input_datetime",
-            "same_orbit_direction": bool(pair_cfg.get("same_orbit_direction", False)),
-            "auto_relax": bool(pair_cfg.get("auto_relax", False)),
-            "resampling": staging_cfg.get("resampling", "bilinear"),
-            "target_crs": staging_cfg.get("target_crs"),
-            "target_resolution": staging_cfg.get("target_resolution"),
-            "cache_staging": cache_enabled,
-            "save_debug_artifacts": save_debug_artifacts,
-            "device": infer_config.get("device"),
-        },
-    }
-    if diag is not None:
-        summary["initial_diagnostics"] = diag
-    if compatibility_info is not None:
-        summary["compatibility"] = compatibility_info
-    attach_sr_output_geojson(
-        summary=summary,
-        geometry_wgs84=aoi_geometry,
-        infer_config=infer_config,
-        source_t1_items=[chosen_pair.get("t2_item")] if chosen_pair.get("t2_item") is not None else None,
-        source_t2_items=[chosen_pair.get("t1_item")] if chosen_pair.get("t1_item") is not None else None,
-    )
-    summary_json, summary_md = aoi_summary_paths(run_dir)
-    summary["summary_json"] = str(summary_json)
-    summary["summary_md"] = (str(summary_md) if summary_md else None)
-    write_run_summary(run_dir, summary)
-    return summary
+def run_stac_representative_componentized_pipeline(
+    config: Dict[str, Any],
+    geojson_path: str,
+    output_root: Optional[str],
+    cache_staging: bool,
+    device: Optional[str],
+) -> Dict[str, Any]:
+    """Canonical STAC representative pipeline for componentized parent-mosaic delivery."""
+    return run_stac_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
 
 
 def run_stac_representative_calendar_pipeline(
@@ -3794,6 +3533,7 @@ def run_stac_representative_calendar_pipeline(
     if device:
         infer_config["device"] = device
     log_effective_runtime_settings(
+        workflow_mode=WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
         train_cfg=train_cfg,
         infer_config=infer_config,
         save_debug_artifacts=save_debug_artifacts,
@@ -4719,6 +4459,28 @@ def _build_gee_scene_collection(collection_id: str, scene_items: List[Dict[str, 
     return ee.ImageCollection.fromImages(images)
 
 
+def run_gee_representative_whole_aoi_pipeline(
+    config: Dict[str, Any],
+    geojson_path: str,
+    output_root: Optional[str],
+    cache_staging: bool,
+    device: Optional[str],
+) -> Dict[str, Any]:
+    """Canonical GEE representative pipeline for the whole-AOI spatial strategy."""
+    return run_gee_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
+
+
+def run_gee_representative_componentized_pipeline(
+    config: Dict[str, Any],
+    geojson_path: str,
+    output_root: Optional[str],
+    cache_staging: bool,
+    device: Optional[str],
+) -> Dict[str, Any]:
+    """Canonical GEE representative pipeline for componentized parent-mosaic delivery."""
+    return run_gee_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
+
+
 def run_gee_representative_calendar_pipeline(
     config: Dict[str, Any],
     geojson_path: str,
@@ -4841,6 +4603,7 @@ def run_gee_representative_calendar_pipeline(
     if device:
         infer_config["device"] = device
     log_effective_runtime_settings(
+        workflow_mode=WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE,
         train_cfg=train_cfg,
         infer_config=infer_config,
         save_debug_artifacts=save_debug_artifacts,
@@ -5696,242 +5459,112 @@ def run_stac_trainlike_pipeline(
     cache_staging: bool,
     device: Optional[str],
 ) -> Dict[str, Any]:
-    """AOI -> STAC timeline -> anchor -> multi-scene window download -> local composite -> inference."""
+    """Dispatch canonical STAC trainlike requests by spatial strategy."""
     train_cfg = config.get("trainlike", {})
-    selection_strategy = str(train_cfg.get("selection_strategy", "latest_anchor_by_support_pair")).strip().lower()
-    if selection_strategy == "representative_calendar_period":
-        return run_stac_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
-
-    try:
-        from infer_production import SARInferencer
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Inference dependencies are missing. Please install the production inference environment before running sar_pipeline.py."
-        ) from exc
-
-    aoi_path = Path(geojson_path)
-    if not aoi_path.exists():
-        raise FileNotFoundError(f"AOI GeoJSON not found: {aoi_path}")
-    aoi_id = resolve_runtime_aoi_id(config, aoi_path)
-
-    stac_cfg = config.get("stac", {})
-    pair_cfg = config.get("pairing", {})
-    infer_cfg = config.get("inference", {})
-    out_cfg = config.get("output", {})
-    compatibility_info = check_domain_compatibility(config, current_profile_override="stac_trainlike_composite_db")
-    save_debug_artifacts = save_debug_artifacts_enabled(config)
-
-    required_pols = parse_required_pols(pair_cfg.get("pols", "VV,VH"))
-    if required_pols != ["VV", "VH"]:
-        raise ValueError("STAC train-like pipeline currently requires pols=VV,VH.")
-
-    run_root = ensure_dir(output_root or out_cfg.get("root_dir", "runs/pipeline"))
-    run_dir = resolve_pipeline_run_dir(config, run_root, aoi_id)
-    manifest_path = aoi_manifest_path(run_dir)
-    output_dir = ensure_dir(run_dir / out_cfg.get("output_dir_name", "output"))
-
-    client = STACClient(stac_cfg.get("url", DEFAULT_STAC_API))
-    query_args = build_query_namespace(config, str(aoi_path))
-    items, aoi_bbox, aoi_geometry = collect_items_with_filters(client, query_args, required_pols)
-    if not items:
-        raise RuntimeError(f"No STAC items passed hard filters for {aoi_path}.")
-    datetime_resolution = compact_jsonable((config.get("_runtime", {}) or {}).get("datetime_resolution"))
-
-    anchor_candidate, required_scene_count = choose_anchor_candidate(items, aoi_bbox, aoi_geometry, train_cfg, pair_cfg)
-    manifest = build_trainlike_anchor_manifest(anchor_candidate, aoi_bbox, str(aoi_path), required_pols)
-    manifest["required_scene_count"] = required_scene_count
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
-
-    anchor_dt = datetime.fromisoformat(manifest["anchor_datetime"].replace("Z", "+00:00"))
-    pre_items_full, post_items_full = collect_anchor_window_items(
-        items=items,
-        aoi_geometry=aoi_geometry,
-        aoi_bbox=aoi_bbox,
-        anchor_dt=anchor_dt,
-        window_before_days=float(manifest["window_before_days"]),
-        window_after_days=float(manifest["window_after_days"]),
-        min_aoi_coverage=float(pair_cfg.get("min_aoi_coverage", 0.0)),
+    selection_strategy = normalize_selection_strategy(
+        train_cfg.get("selection_strategy", SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD),
+        default=SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD,
     )
-    pre_items = dedupe_items_by_scene(pre_items_full)
-    post_items = dedupe_items_by_scene(post_items_full)
-    if len(pre_items) < required_scene_count or len(post_items) < required_scene_count:
-        raise RuntimeError(
-            "Selected anchor no longer satisfies the required scene count after item reconstruction."
+    if not is_canonical_selection_strategy(selection_strategy):
+        raise ValueError(
+            "stac_trainlike_composite currently supports only "
+            "trainlike.selection_strategy=representative_calendar_period."
         )
+    spatial_strategy = resolve_spatial_strategy(train_cfg)
+    if spatial_strategy == SPATIAL_STRATEGY_WHOLE_AOI:
+        return run_stac_representative_whole_aoi_pipeline(
+            config,
+            geojson_path,
+            output_root,
+            cache_staging,
+            device,
+        )
+    if spatial_strategy == SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC:
+        return run_stac_representative_componentized_pipeline(
+            config,
+            geojson_path,
+            output_root,
+            cache_staging,
+            device,
+        )
+    raise ValueError(f"Unsupported canonical STAC spatial strategy: {spatial_strategy}")
 
-    infer_config = load_yaml(infer_cfg.get("config_path", "config/infer_config.yaml"))
-    infer_overrides = apply_inference_env_overrides(infer_config)
-    if infer_overrides:
-        infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
-        log_inference_env_overrides(infer_config)
-    if device:
-        infer_config["device"] = device
-    inferencer = SARInferencer(infer_config)
-    target_crs = str(train_cfg.get("target_crs", "EPSG:3857"))
-    target_resolution = float(train_cfg.get("target_resolution", 10.0))
-    resampling_name = str(train_cfg.get("resampling", config.get("staging", {}).get("resampling", "bilinear")))
-    focal_radius_m = float(train_cfg.get("focal_median_radius_m", 15.0))
-    pair_id = manifest["pair_id"]
-    with tempfile.TemporaryDirectory(prefix="sr_anchor_") as transient_dir:
-        transient_root = Path(transient_dir)
-        window_raw_dir = ensure_dir(inputs_dir(run_dir) / train_cfg.get("window_raw_dir_name", "window_raw"))
-        composite_dir = ensure_dir(intermediate_dir(run_dir) / train_cfg.get("composite_dir_name", "composite"))
-        emit_pipeline_log(
-            logging.INFO,
-            "Persisting trainlike debug artifacts",
-            run_dir=run_dir,
-            window_raw_dir=window_raw_dir,
-            composite_dir=composite_dir,
-            cleanup_after_publish_success=(not save_debug_artifacts),
-        )
-        downloader = S3Downloader()
-        pre_paths = download_window_assets(pre_items, window_raw_dir / "pre", aoi_geometry, required_pols, downloader)
-        post_paths = download_window_assets(post_items, window_raw_dir / "post", aoi_geometry, required_pols, downloader)
 
-        grid = build_target_grid(aoi_bbox, target_crs, target_resolution, target_resolution)
-        t1_composite_path, post_meta = compose_window_to_multiband(
-            grouped_paths=post_paths,
-            grid=grid,
-            resampling_name=resampling_name,
-            focal_radius_m=focal_radius_m,
-            out_path=composite_dir / f"s1t1_{pair_id}.tif",
-            output_cfg=out_cfg,
-        )
-        t2_composite_path, pre_meta = compose_window_to_multiband(
-            grouped_paths=pre_paths,
-            grid=grid,
-            resampling_name=resampling_name,
-            focal_radius_m=focal_radius_m,
-            out_path=composite_dir / f"s1t2_{pair_id}.tif",
-            output_cfg=out_cfg,
-        )
-        transient_output_tif = transient_root / f"{aoi_id}__{pair_id}_SR_x2.tif"
-        inferencer.run_pair_from_multiband_files(
-            identifier=pair_id,
-            t1_path=t1_composite_path,
-            t2_path=t2_composite_path,
-            out_path=transient_output_tif,
-            config=model_trainlike_semantics(),
-        )
-        packaged_outputs = export_masked_sr_band_cogs(
-            sr_multiband_path=transient_output_tif,
-            output_dir=output_dir,
-            output_basename=f"{aoi_id}__{pair_id}",
-            geometry_wgs84=aoi_geometry,
-            compression=infer_config.get("output", {}).get("compression", "DEFLATE"),
-            blocksize=int(infer_config.get("output", {}).get("blockxsize", 512)),
-            persist_valid_mask=False,
-            final_target_crs=out_cfg.get("final_target_crs"),
-            final_target_resolution=out_cfg.get("final_target_resolution"),
-            final_resampling_name=str(out_cfg.get("final_resampling", "bilinear")),
-        )
-
-    summary = {
-        "workflow_mode": "stac_trainlike_composite",
-        "aoi_geojson": resolve_aoi_source_ref(config, aoi_path),
-        "run_dir": str(run_dir),
-        "anchor_manifest_path": str(manifest_path),
-        "window_raw_dir": str(window_raw_dir),
-        "composite_dir": str(composite_dir),
-        "t1_composite_path": str(t1_composite_path),
-        "t2_composite_path": str(t2_composite_path),
-        "output_tif": None,
-        "output_sr_vv_tif": packaged_outputs["output_sr_vv_tif"],
-        "output_sr_vh_tif": packaged_outputs["output_sr_vh_tif"],
-        "output_sr_band_tifs": packaged_outputs["output_sr_band_tifs"],
-        "output_valid_mask_path": packaged_outputs["output_valid_mask_path"],
-        "inference_input_semantics": model_trainlike_semantics(),
-        "items_after_hard_filter": len(items),
-        "anchor": {
-            "selection_priority": manifest.get("selection_priority", "latest_input_datetime"),
-            "anchor_strategy": manifest["anchor_strategy"],
-            "anchor_datetime": manifest["anchor_datetime"],
-            "latest_input_datetime": manifest.get("latest_input_datetime"),
-            "window_before_days": manifest["window_before_days"],
-            "window_after_days": manifest["window_after_days"],
-            "required_scene_count": required_scene_count,
-            "support_t1_id": manifest.get("t1_id"),
-            "support_t2_id": manifest.get("t2_id"),
-            "support_t1_datetime": manifest.get("t1_datetime"),
-            "support_t2_datetime": manifest.get("t2_datetime"),
-            "support_later_id": manifest.get("later_id", manifest.get("t1_id")),
-            "support_earlier_id": manifest.get("earlier_id", manifest.get("t2_id")),
-            "support_later_datetime": manifest.get("later_datetime", manifest.get("t1_datetime")),
-            "support_earlier_datetime": manifest.get("earlier_datetime", manifest.get("t2_datetime")),
-            "support_pair_delta_hours": manifest.get("support_pair_delta_hours"),
-            "support_pair_delta_days": manifest.get("support_pair_delta_days"),
-            "pre_scene_count": len(pre_items),
-            "post_scene_count": len(post_items),
-            "pre_scenes": manifest.get("pre_scenes", []),
-            "post_scenes": manifest.get("post_scenes", []),
-            "model_input_semantics": model_trainlike_semantics(),
-        },
-        "composite": {
-            "grid": post_meta["grid"],
-            "pre": pre_meta,
-            "post": post_meta,
-        },
-        "downloaded_files": {
-            "pre": {pol: [str(p) for p in paths] for pol, paths in pre_paths.items()},
-            "post": {pol: [str(p) for p in paths] for pol, paths in post_paths.items()},
-        },
-        "run_config": {
-            "stac_url": stac_cfg.get("url", DEFAULT_STAC_API),
-            "collection": stac_cfg.get("collection", DEFAULT_COLLECTION),
-            "datetime": stac_cfg.get("datetime"),
-            "datetime_resolution": datetime_resolution,
-            "limit": int(stac_cfg.get("limit", 300)),
-            "min_aoi_coverage": float(pair_cfg.get("min_aoi_coverage", 0.0)),
-            "pols": ",".join(required_pols),
-            "window_before_days": float(manifest["window_before_days"]),
-            "window_after_days": float(manifest["window_after_days"]),
-            "min_scenes_per_window": required_scene_count,
-            "selection_priority": "latest_input_datetime",
-            "same_orbit_direction": bool(train_cfg.get("same_orbit_direction", pair_cfg.get("same_orbit_direction", False))),
-            "target_crs": target_crs,
-            "target_resolution": target_resolution,
-            "resampling": resampling_name,
-            "focal_median_radius_m": focal_radius_m,
-            "device": infer_config.get("device"),
-            "cache_staging": cache_staging,
-            "save_debug_artifacts": save_debug_artifacts,
-        },
-    }
-    if compatibility_info is not None:
-        summary["compatibility"] = compatibility_info
-    attach_sr_output_geojson(
-        summary=summary,
-        geometry_wgs84=aoi_geometry,
-        infer_config=infer_config,
-        source_t1_items=post_items,
-        source_t2_items=pre_items,
+def run_gee_trainlike_pipeline(
+    config: Dict[str, Any],
+    geojson_path: str,
+    output_root: Optional[str],
+    cache_staging: bool,
+    device: Optional[str],
+) -> Dict[str, Any]:
+    """Dispatch GEE trainlike requests to canonical whole-AOI or componentized wrappers."""
+    train_cfg = config.get("trainlike", {})
+    selection_strategy = normalize_selection_strategy(
+        train_cfg.get("selection_strategy", SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD)
     )
-    summary_json, summary_md = aoi_summary_paths(run_dir)
-    summary["summary_json"] = str(summary_json)
-    summary["summary_md"] = (str(summary_md) if summary_md else None)
-    write_trainlike_run_summary(run_dir, summary)
-    return summary
+    if not is_canonical_selection_strategy(selection_strategy):
+        raise ValueError(
+            "gee_trainlike_composite currently supports only "
+            "trainlike.selection_strategy=representative_calendar_period."
+        )
+    spatial_strategy = resolve_spatial_strategy(train_cfg)
+    if spatial_strategy == SPATIAL_STRATEGY_WHOLE_AOI:
+        return run_gee_representative_whole_aoi_pipeline(
+            config,
+            geojson_path,
+            output_root,
+            cache_staging,
+            device,
+        )
+    if spatial_strategy == SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC:
+        return run_gee_representative_componentized_pipeline(
+            config,
+            geojson_path,
+            output_root,
+            cache_staging,
+            device,
+        )
+    raise ValueError(f"Unsupported canonical GEE spatial strategy: {spatial_strategy}")
+
+
+def run_representative_composite_pipeline(
+    config: Dict[str, Any],
+    geojson_path: str,
+    output_root: Optional[str],
+    cache_staging: bool,
+    device: Optional[str],
+) -> Dict[str, Any]:
+    """Dispatch canonical representative composite pipelines by backend."""
+    workflow_mode = normalize_workflow_mode(
+        (config.get("workflow", {}) or {}).get("mode", WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE),
+        default=WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
+    )
+    if workflow_mode == WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE:
+        return run_stac_trainlike_pipeline(config, geojson_path, output_root, cache_staging, device)
+    if workflow_mode == WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE:
+        return run_gee_trainlike_pipeline(config, geojson_path, output_root, cache_staging, device)
+    raise ValueError(f"Unsupported representative composite workflow.mode: {config.get('workflow', {}).get('mode')}")
 
 
 def run_pipeline(config: Dict[str, Any], geojson_path: str, output_root: Optional[str], cache_staging: bool, device: Optional[str]) -> Dict[str, Any]:
     workflow_cfg = config.get("workflow", {})
-    mode = str(workflow_cfg.get("mode", "exact_pair")).strip().lower()
+    mode = normalize_workflow_mode(
+        workflow_cfg.get("mode", WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE),
+        default=WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
+    )
+
     try:
-        if mode == "exact_pair":
-            return run_exact_pair_pipeline(config, geojson_path, output_root, cache_staging, device)
-        if mode == "stac_trainlike_composite":
-            return run_stac_trainlike_pipeline(config, geojson_path, output_root, cache_staging, device)
-        if mode == "gee_trainlike_composite":
-            selection_strategy = str(config.get("trainlike", {}).get("selection_strategy", "representative_calendar_period")).strip().lower()
-            if selection_strategy != "representative_calendar_period":
-                raise ValueError(
-                    "gee_trainlike_composite currently supports only trainlike.selection_strategy=representative_calendar_period."
-                )
-            return run_gee_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
+        if is_representative_composite_workflow_mode(mode):
+            return run_representative_composite_pipeline(
+                config,
+                geojson_path,
+                output_root,
+                cache_staging,
+                device,
+            )
         raise ValueError(f"Unsupported workflow.mode: {workflow_cfg.get('mode')}")
     except Exception as exc:
-        if mode not in {"stac_trainlike_composite", "gee_trainlike_composite"}:
+        if not is_representative_composite_workflow_mode(mode):
             raise
         aoi_path = Path(geojson_path)
         aoi_id = resolve_runtime_aoi_id(config, aoi_path)
@@ -5955,30 +5588,19 @@ def run_pipeline(config: Dict[str, Any], geojson_path: str, output_root: Optiona
 
 def _print_pipeline_completion(summary: Dict[str, Any]) -> None:
     print("[PIPELINE] completed")
+    workflow_mode = normalize_workflow_mode(
+        summary.get("workflow_mode"),
+        default=WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
+    )
     print(f"  Mode: {summary['workflow_mode']}")
     print(f"  AOI: {summary['aoi_geojson']}")
-    if summary["workflow_mode"] == "exact_pair":
-        pair = summary["selected_pair"]
-        print(f"  Pair: {pair['pair_id']}")
-        print(f"  Latest input: {pair['latest_input_datetime']}")
-        print(f"  Delta: {format_duration_human(pair['delta_seconds'])}")
-        print(f"  AOI geometry coverage min: {pair['aoi_coverage_min']:.3f}")
-        print(f"  AOI bbox coverage min (diagnostic): {pair['aoi_bbox_coverage_min']:.3f}")
-        print(f"  Output: {summary['output_tif']}")
-    elif summary.get("selection_strategy") == "representative_calendar_period":
+    if is_representative_composite_workflow_mode(workflow_mode):
         counts = summary["period_counts"]
-        print(f"  Selection strategy: {summary['selection_strategy']}")
+        print(f"  Selection strategy: {summary.get('selection_strategy')}")
         print(f"  Periods: total={counts['total']} completed={counts['completed']} skipped={counts['skipped']}")
         first_output = next((p.get("output_tif") for p in summary["period_results"] if p.get("status") == "completed"), None)
         if first_output:
             print(f"  First output: {first_output}")
-    else:
-        anchor = summary["anchor"]
-        print(f"  Anchor: {anchor['anchor_datetime']}")
-        print(f"  Latest input: {anchor.get('latest_input_datetime')}")
-        print(f"  Window: -{anchor['window_before_days']}d / +{anchor['window_after_days']}d")
-        print(f"  Scenes: pre={anchor['pre_scene_count']} post={anchor['post_scene_count']}")
-        print(f"  Output: {summary['output_tif']}")
     runtime_summary = summary.get("summary_json")
     runtime_run_dir = summary.get("run_dir") or summary.get("period_dir")
     if runtime_run_dir:
@@ -6170,6 +5792,10 @@ def build_runtime_job_record(
         "job_id": job_layout["job_id"],
         "source_mode": job_layout["source_mode"],
         "workflow_mode": job_layout["workflow_mode"],
+        "pipeline_profile": describe_pipeline_profile(
+            workflow_mode=job_layout["workflow_mode"],
+            train_cfg=(resolved_config or {}).get("trainlike", {}) if isinstance(resolved_config, dict) else {},
+        ),
         "job_dir": job_layout["job_dir"],
         "aois_dir": job_layout["aois_dir"],
         "config_path": config_path,
@@ -6211,6 +5837,10 @@ def run_database_aoi_batch(
     capture_output: bool = True,
 ) -> Tuple[Dict[str, Any], int]:
     workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
+    workflow_profile = describe_pipeline_profile(
+        workflow_mode=workflow_mode,
+        train_cfg=config.get("trainlike", {}),
+    )
     default_root = ensure_dir(output_root or config.get("output", {}).get("root_dir", "runs/pipeline"))
     job_layout = job_layout_override or prepare_storage_job_layout(
         base_root=default_root,
@@ -6226,6 +5856,7 @@ def run_database_aoi_batch(
         workflow_mode=workflow_mode,
         record_count=len(records),
         selection_mode=selection_mode,
+        **workflow_profile,
     )
 
     aoi_entries: List[Dict[str, Any]] = []
@@ -6369,8 +6000,19 @@ def main() -> None:
         action="store_true",
         help="Query all ACTIVE AOIs from public.aois and process them sequentially.",
     )
-    parser.add_argument("--config", default="config/pipeline_config.yaml", help="Path to pipeline config")
-    parser.add_argument("--mode", default=None, help="Override workflow mode: exact_pair, stac_trainlike_composite, or gee_trainlike_composite")
+    parser.add_argument(
+        "--config",
+        default="config/pipeline_config_stac_runtime.yaml",
+        help="Path to pipeline config",
+    )
+    parser.add_argument(
+        "--mode",
+        default=None,
+        help=(
+            "Override workflow mode: "
+            "stac_trainlike_composite or gee_trainlike_composite."
+        ),
+    )
     parser.add_argument("--db-env-path", default=".env", help="Path to .env file used to resolve PG* database settings.")
     parser.add_argument("--db-limit", type=int, default=None, help="Optional safety limit for --db-all-active-aois.")
     parser.add_argument(
@@ -6522,6 +6164,10 @@ def main() -> None:
         config["gee"]["authenticate"] = True
     if args.geojson:
         workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
+        workflow_profile = describe_pipeline_profile(
+            workflow_mode=workflow_mode,
+            train_cfg=config.get("trainlike", {}),
+        )
         default_root = ensure_dir(args.output_dir or config.get("output", {}).get("root_dir", "runs/pipeline"))
         job_layout = prepare_storage_job_layout(
             base_root=default_root,
@@ -6560,6 +6206,7 @@ def main() -> None:
                 output_root=aoi_layout["aoi_dir"],
                 target_month=config.get("trainlike", {}).get("target_month"),
                 datetime=config.get("stac", {}).get("datetime") or config.get("gee", {}).get("datetime"),
+                **workflow_profile,
             )
             if config.get("logging", {}).get("startup_env_checks", True):
                 log_startup_checks(runtime["startup_checks"])
@@ -6595,6 +6242,10 @@ def main() -> None:
 
     if args.db_aoi_id:
         workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
+        workflow_profile = describe_pipeline_profile(
+            workflow_mode=workflow_mode,
+            train_cfg=config.get("trainlike", {}),
+        )
         single_root = ensure_dir(args.output_dir or config.get("output", {}).get("root_dir", "runs/pipeline"))
         job_layout = prepare_storage_job_layout(
             base_root=single_root,
@@ -6622,6 +6273,7 @@ def main() -> None:
                 target_month=config.get("trainlike", {}).get("target_month"),
                 datetime=config.get("stac", {}).get("datetime") or config.get("gee", {}).get("datetime"),
                 requested_aoi_id=args.db_aoi_id,
+                **workflow_profile,
             )
             if config.get("logging", {}).get("startup_env_checks", True):
                 log_startup_checks(startup_checks)
@@ -6708,6 +6360,10 @@ def main() -> None:
         return
 
     workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
+    workflow_profile = describe_pipeline_profile(
+        workflow_mode=workflow_mode,
+        train_cfg=config.get("trainlike", {}),
+    )
     default_root = ensure_dir(args.output_dir or config.get("output", {}).get("root_dir", "runs/pipeline"))
     preview_job_layout = prepare_storage_job_layout(
         base_root=default_root,
@@ -6735,6 +6391,7 @@ def main() -> None:
             target_month=config.get("trainlike", {}).get("target_month"),
             datetime=config.get("stac", {}).get("datetime") or config.get("gee", {}).get("datetime"),
             requested_db_limit=args.db_limit,
+            **workflow_profile,
         )
         if config.get("logging", {}).get("startup_env_checks", True):
             log_startup_checks(startup_checks)
