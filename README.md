@@ -8,7 +8,7 @@ Phạm vi khuyến nghị hiện tại:
 - đóng gói output local
 - tùy chọn publish lên STAC/S3 đích
 
-Các helper GEE cũ vẫn còn trong repo, nhưng không còn nằm trong đường cài đặt mặc định nữa.
+Repo vẫn giữ backend GEE song song với STAC. Các benchmark/analysis legacy đã bị cô lập khỏi đường chạy chính.
 
 Ma trận runtime chuẩn hiện tại:
 - `stac + whole_aoi`
@@ -20,22 +20,25 @@ Core runtime hiện được tổ chức theo đúng 4 luồng chuẩn ở trên
 
 ## 🗂️ Cấu Trúc Thư Mục
 
-Các thư mục và file đáng quan tâm nhất khi vận hành repo này:
+README này mô tả theo tree đang được `git` track ở branch hiện tại, không tính các file local/untracked:
 
 ```
 ISSM-SAR/
 ├── config/
 │   ├── pipeline_config_stac_runtime.yaml
-│   │   └─ config chuẩn cho backend STAC
 │   ├── pipeline_config_gee_runtime.yaml
-│   │   └─ config chuẩn cho backend GEE
-│   └─ chứa các file cấu hình runtime, infer và các recipe YAML
+│   ├── infer_config.yaml
+│   └─ các YAML runtime / infer / training được track trên remote
 ├── docker/
 │   └─ entrypoint và các thành phần hỗ trợ container runtime
 ├── docs/
-│   └─ tài liệu vận hành, reference và các ghi chú phân tích
+│   └─ tài liệu runtime, publish, module guide và các ghi chú tham khảo
 ├── src/
-│   └─ code training/architecture/data của model, không phải entrypoint runtime chính
+│   └─ code model / dataset / Lightning cho training và eval
+├── tools/
+│   └─ utility scripts được track cho publish hoặc inventory workflow
+├── utils/
+│   └─ utility legacy / notebook / crop configs vẫn còn được track
 ├── sar_pipeline.py
 │   └─ entrypoint pipeline runtime chính
 ├── sr_workflow.py
@@ -43,13 +46,43 @@ ISSM-SAR/
 ├── sr_publish.py
 │   └─ preflight/publish SR item lên STAC/S3 đích
 ├── query_stac_download.py
-│   └─ query STAC, lọc inventory và download AOI subset
+│   └─ facade CLI/public API cho query STAC, filtering và download helper
+├── stac_support/
+│   ├── stac_time_support.py
+│   ├── stac_item_support.py
+│   ├── stac_geometry_support.py
+│   ├── stac_client_support.py
+│   ├── s3_download_support.py
+│   ├── stac_filter_support.py
+│   └── representative_selection_support.py
+│   └─ package helper cho datetime, item metadata, geometry, STAC/S3 IO và representative selection
 ├── db_aoi_source.py
 │   └─ đọc AOI từ database và materialize thành GeoJSON tạm cho pipeline
+├── pipeline_support/
+│   ├── json_support.py
+│   ├── contract_support.py
+│   ├── runtime_support.py
+│   ├── raster_support.py
+│   └── sr_packaging_support.py
+│   └─ package helper cho JSON, contract, runtime layout, raster/output và SR packaging
+├── pipeline_json_support.py
+│   └─ compatibility wrapper trỏ về `pipeline_support.json_support`
+├── pipeline_contract_support.py
+│   └─ compatibility wrapper trỏ về `pipeline_support.contract_support`
+├── pipeline_runtime_support.py
+│   └─ compatibility wrapper trỏ về `pipeline_support.runtime_support`
 ├── runtime_env_overrides.py
 │   └─ map env var vào pipeline/infer config runtime
 ├── runtime_logging.py
 │   └─ logging helpers dùng chung cho runtime
+├── infer_production.py
+│   └─ inference runtime cho cặp input multiband đã được chuẩn hóa
+├── gee_compare_download.py
+│   └─ helper GEE dùng chung cho composite runtime
+├── gee_trainlike_download.py
+│   └─ helper GEE representative-composite
+├── train.py / train_lightning.py / trainer*.py
+│   └─ entrypoint training còn được track trên remote
 ├── Dockerfile
 │   └─ image runtime để chạy bằng Docker
 └── .env.example
@@ -67,7 +100,7 @@ Chọn file nhỏ nhất đúng với nhu cầu của bạn:
   - bộ dependency khuyến nghị khi chạy local ngoài Docker
   - gồm `requirements_runtime_stac.txt` + `torch`
 - `requirements_gee.txt`
-  - dependency tùy chọn cho các tool/flow GEE cũ
+  - dependency tùy chọn cho backend GEE và các helper liên quan
 - `requirements.txt`
   - bộ local rộng hơn cho train / eval / dev
 

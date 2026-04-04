@@ -21,8 +21,13 @@ RUN pip install --no-cache-dir -r requirements_runtime_stac.txt
 
 COPY sar_pipeline.py ./
 COPY query_stac_download.py ./
+COPY stac_support/ stac_support/
 COPY infer_production.py ./
 COPY db_aoi_source.py ./
+COPY pipeline_json_support.py ./
+COPY pipeline_contract_support.py ./
+COPY pipeline_runtime_support.py ./
+COPY pipeline_support/ pipeline_support/
 COPY runtime_logging.py ./
 COPY runtime_env_overrides.py ./
 COPY sr_workflow.py ./
@@ -42,8 +47,23 @@ sys.path.insert(0, '/app')
 sys.path.insert(0, '/app/src')
 import sar_pipeline  # noqa: F401
 import query_stac_download  # noqa: F401
+import stac_support.stac_time_support  # noqa: F401
+import stac_support.stac_item_support  # noqa: F401
+import stac_support.stac_geometry_support  # noqa: F401
+import stac_support.stac_client_support  # noqa: F401
+import stac_support.s3_download_support  # noqa: F401
+import stac_support.stac_filter_support  # noqa: F401
+import stac_support.representative_selection_support  # noqa: F401
 import infer_production  # noqa: F401
 import db_aoi_source  # noqa: F401
+import pipeline_json_support  # noqa: F401
+import pipeline_contract_support  # noqa: F401
+import pipeline_runtime_support  # noqa: F401
+import pipeline_support.json_support  # noqa: F401
+import pipeline_support.contract_support  # noqa: F401
+import pipeline_support.runtime_support  # noqa: F401
+import pipeline_support.raster_support  # noqa: F401
+import pipeline_support.sr_packaging_support  # noqa: F401
 import sr_workflow  # noqa: F401
 import sr_publish  # noqa: F401
 print('runtime import smoke passed')    
