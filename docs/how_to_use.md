@@ -15,7 +15,7 @@ Production default hien tai trong `config/pipeline_config.yaml` la:
 - `trainlike.target_crs = EPSG:3857`
 - `trainlike.target_resolution = 10.0`
 - `pairing.min_aoi_coverage = 0.0`
-- `trainlike.componentize_seed_intersections = false`
+- `trainlike.componentize_seed_intersections = true`
 - model semantics: `T1/S1T1 = later/post`, `T2/S1T2 = earlier/pre`
 
 Y nghia thuc te:
@@ -65,18 +65,7 @@ Luu y:
 - lenh STAC tren dung cho parity/debug hoac khi inventory STAC du item
 - voi inventory test hien tai, nhieu AOI se skip do thieu scene o 2 nua thang
 
-### 2.3 Exact pair debug
-
-```bash
-python sar_pipeline.py \
-  --mode exact_pair \
-  --geojson geojson/ffa6dc6b-06f7-4af2-bb95-af5438bdfba2.geojson \
-  --config config/pipeline_config.yaml \
-  --datetime 2025-01-01/2025-12-31 \
-  --output-dir runs/customer_jobs_exact
-```
-
-### 2.4 Query AOI tu database va chay tuan tu
+### 2.3 Query AOI tu database va chay tuan tu
 
 Neu da co thong tin `PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE` trong `.env`, pipeline co the doc AOI truc tiep tu `public.aois`.
 
@@ -262,7 +251,6 @@ Gia tri hop le:
 
 - `gee_trainlike_composite`
 - `stac_trainlike_composite`
-- `exact_pair`
 
 Y nghia:
 
@@ -270,11 +258,9 @@ Y nghia:
   - production default hien tai
   - chi ho tro `trainlike.selection_strategy = representative_calendar_period`
 - `stac_trainlike_composite`
-  - ho tro ca 2 nhanh:
-    - representative-month moi
-    - legacy anchor-driven train-like neu `selection_strategy` khong phai `representative_calendar_period`
-- `exact_pair`
-  - debug/benchmark single-scene
+  - semantics giong GEE
+  - chi ho tro `trainlike.selection_strategy = representative_calendar_period`
+  - canonical runtime hien yeu cau `trainlike.componentize_seed_intersections = true`
 
 ### 5.4 `--datetime`
 
@@ -344,40 +330,21 @@ Luu y:
 - day khong phai bbox coverage
 - `aoi_bbox_coverage_*` chi la diagnostic, khong con la hard filter
 
-### 5.7 `--same-orbit-direction`
+### 5.7 same-orbit-direction
 
-Tac dung:
+Khong con ho tro trong runtime canonical.
 
-- exact pair: 2 item phai cung `orbit_state`
-- representative-month: bo level `mixed_orbit_allowed` trong relaxation ladder
+Representative-month hien tai co dinh `representative_pool_mode = mixed`, nen khong con cho phep bat che do ep cung orbit signature.
 
-Neu bat flag nay, pipeline nghiem khac hon. No giup giam drift do mixed orbit, nhung cung de lam tang so thang bi skip.
+### 5.8 representative pool mode
 
-### 5.8 `--representative-pool-mode`
+Khong con cho phep override bang CLI hay env.
 
-Chi ap dung cho `representative_calendar_period`.
+Runtime canonical hien tai luon dung:
 
-Gia tri hop le:
+- `trainlike.representative_pool_mode = mixed`
 
-- `auto`
-  - giu nguyen relaxation ladder hien tai
-  - uu tien pool cung orbit, chi roi sang mixed neu can
-- `orbit_only`
-  - chi cho phep cac pool theo orbit signature
-  - khong bao gio roi sang mixed-orbit pool
-- `mixed`
-  - ep dung 1 pool `pre/post` chung, khong tach theo orbit
-  - phu hop khi muon composite tat ca scene hop le trong nua dau / nua sau cua thang
-
-Vi du:
-
-```bash
-python sar_pipeline.py \
-  --db-aoi-id ffa6dc6b-06f7-4af2-bb95-af5438bdfba2 \
-  --mode stac_trainlike_composite \
-  --target-month 2026-01 \
-  --representative-pool-mode mixed
-```
+Nghia la pool `pre/post` duoc chon theo 1 nhom scene hop le chung trong tung nua thang, khong con giu cac bien the `auto` hay `orbit_only`.
 
 ### 5.9 `--target-crs`
 
@@ -536,7 +503,7 @@ Y nghia them:
 
 - bat buoc giu lai aligned/staged inputs o cac workflow co staging local
 - huu ich cho QA, debug, visual inspection
-- voi GEE representative-month, run summary van ghi `cache_staging`, nhung workflow nay chu yeu ghi `composite` va `output` theo period; khong co y nghia giong exact pair local staging
+- voi GEE representative-month, run summary van ghi `cache_staging`, nhung workflow nay chu yeu ghi `composite` va `output` theo period
 
 ### 5.17 `--gee-project`
 
@@ -550,21 +517,18 @@ Y nghia them:
 
 ### 5.19 `--min-delta-hours`, `--max-delta-days`
 
-- day la nhom rang buoc thoi gian chinh cua `exact_pair`
-- chung cung duoc tai su dung boi mot so helper legacy/support-pair diagnostics
-- chung khong phai nhom tham so production trung tam cua representative-month hien tai
+- day la nhom tham so con lai vi ly do compatibility
+- canonical representative-month hien tai khong dua vao bo tham so nay de quyet dinh duong chay chinh
 
 ### 5.20 `--auto-relax`
 
-- bat fallback `balanced/loose` cho exact-pair search
-- khong phai relaxation ladder cua representative-month
+- flag nay khong nam trong duong chay canonical hien tai
 - representative-month dung `trainlike.auto_relax_inside_period`, khong dung flag nay
 
 ### 5.20 `--window-before-days`, `--window-after-days`, `--min-scenes-per-window`
 
-- chi co y nghia trong legacy STAC anchor-driven train-like flow
-- khong phai tham so production chinh cua representative-month
-- GEE representative-month hien tai khong dung bo tham so nay de chia thang
+- bo tham so nay khong nam trong runtime canonical hien tai
+- representative-month componentized khong dung bo tham so nay de chia thang
 
 ### 5.21 `--device`
 
@@ -598,7 +562,7 @@ Cac tham so quan trong thuc su tac dong trong production default:
 
 ### 6.2 Legacy / khong phai tham so chinh cho representative-month
 
-Cac tham so sau van ton tai vi can cho legacy STAC anchor flow hoac tool benchmark/debug, nhung khong phai trung tam cua production recipe hien tai:
+Cac tham so sau co the van ton tai trong config cu hoac tool analysis, nhung khong nam trong production recipe hien tai:
 
 - `trainlike.window_before_days`
 - `trainlike.window_after_days`
@@ -612,8 +576,7 @@ Cac tham so sau van ton tai vi can cho legacy STAC anchor flow hoac tool benchma
 
 Y nghia:
 
-- chung van co tac dung o `exact_pair` hoac `stac_trainlike_composite` legacy anchor flow
-- nhung voi `gee_trainlike_composite` representative-month, day khong phai nhom tham so chinh can uu tien chinh sua
+- day khong phai nhom tham so chinh can uu tien chinh sua cho representative-month componentized
 
 ### 6.3 Cac nhom config khac can hieu dung
 
@@ -637,7 +600,7 @@ Y nghia:
 - `output.root_dir`
   - thu muc root mac dinh cua tat ca run
 - `staging.cache_aligned_inputs`
-  - co y nghia ro nhat o exact-pair/local STAC paths
+  - co y nghia ro nhat o local STAC composite path
   - dung de giu input da align cho QA/debug
 
 ## 7. Relaxation ladder trong representative-month

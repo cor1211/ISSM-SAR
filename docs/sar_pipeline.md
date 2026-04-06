@@ -4,13 +4,11 @@ Tai lieu nay mo ta core runtime hien tai theo kien truc da duoc chot:
 
 - `backend`: `stac` | `gee`
 - `selection_strategy`: `representative_calendar_period`
-- `spatial_strategy`: `whole_aoi` | `componentized_parent_mosaic`
+- `spatial_strategy`: `componentized_parent_mosaic`
 
-4 to hop canonical:
+2 to hop canonical:
 
-- `stac + whole_aoi`
 - `stac + componentized_parent_mosaic`
-- `gee + whole_aoi`
 - `gee + componentized_parent_mosaic`
 
 File nay chi mo ta duong chay canonical. Cac benchmark hoac tai lieu phan tich lich su co the van ton tai o nhung file docs khac, nhung khong con duoc xem la runtime contract chinh.
@@ -50,17 +48,7 @@ STAC va GEE deu dung chung logic period va selection semantics nay.
 
 ## 3. Spatial Strategy Canonical
 
-### 3.1 `whole_aoi`
-
-Toan bo AOI duoc xu ly trong mot representative period:
-
-- chon `pre/post` pools cho parent AOI
-- download/export
-- compose
-- infer
-- ghi output parent duy nhat
-
-### 3.2 `componentized_parent_mosaic`
+### 3.1 `componentized_parent_mosaic`
 
 Parent AOI duoc tach thanh cac child intersection regions:
 
@@ -85,7 +73,6 @@ Workflow mode:
 
 Canonical STAC wrappers:
 
-- `run_stac_representative_whole_aoi_pipeline(...)`
 - `run_stac_representative_componentized_pipeline(...)`
 
 Dispatcher STAC:
@@ -100,7 +87,6 @@ Workflow mode:
 
 Canonical GEE wrappers:
 
-- `run_gee_representative_whole_aoi_pipeline(...)`
 - `run_gee_representative_componentized_pipeline(...)`
 
 Dispatcher GEE:

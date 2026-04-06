@@ -11,12 +11,10 @@ Phạm vi khuyến nghị hiện tại:
 Repo vẫn giữ backend GEE song song với STAC. Các benchmark/analysis legacy đã bị cô lập khỏi đường chạy chính.
 
 Ma trận runtime chuẩn hiện tại:
-- `stac + whole_aoi`
 - `stac + componentized_parent_mosaic`
-- `gee + whole_aoi`
 - `gee + componentized_parent_mosaic`
 
-Core runtime hiện được tổ chức theo đúng 4 luồng chuẩn ở trên; các mode cũ không còn nằm trên đường chạy chính nữa.
+Core runtime hiện được tổ chức theo 2 luồng chuẩn ở trên; các mode cũ không còn nằm trên đường chạy chính nữa.
 
 ## 🗂️ Cấu Trúc Thư Mục
 
@@ -32,7 +30,7 @@ ISSM-SAR/
 │   └── entrypoint.sh
 ├── docs/
 ├── src/
-├── tools/├── utils/├── stac_support/
+├── stac_support/
 │   ├── __init__.py
 │   ├── stac_time_support.py
 │   ├── stac_item_support.py
@@ -70,12 +68,6 @@ ISSM-SAR/
 │   └─ helper GEE dùng chung cho composite runtime
 ├── gee_trainlike_download.py
 │   └─ helper GEE representative-composite
-├── inference.py
-│   └─ inference script legacy còn được track
-├── process_data.py
-│   └─ data processing script legacy còn được track
-├── train.py / train_lightning.py / trainer.py / trainer_2.py
-│   └─ entrypoints training còn được track trên remote
 ├── requirements_runtime_stac.txt / requirements_runtime_local.txt / requirements_gee.txt / requirements.txt
 │   └─ các dependency profile theo nhu cầu runtime/local/gee/full-dev
 ├── Dockerfile
@@ -169,8 +161,9 @@ python sar_pipeline.py \
 Gợi ý:
 - `config/pipeline_config_stac_runtime.yaml` là config chuẩn cho backend STAC
 - `config/pipeline_config_gee_runtime.yaml` là config chuẩn cho backend GEE
-- `trainlike.componentize_seed_intersections=false` sẽ chuyển về `whole_aoi`
-- `trainlike.componentize_seed_intersections=true` giữ `componentized_parent_mosaic`
+- canonical runtime hiện yêu cầu:
+  - `trainlike.componentize_seed_intersections=true`
+  - `trainlike.component_parent_mosaic=true`
 - nên truyền `--config` tường minh thay vì dựa vào config mặc định cũ
 
 ### 4. Publish local

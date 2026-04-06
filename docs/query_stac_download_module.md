@@ -160,22 +160,15 @@ Ham nay la trai tim cua representative-month selection.
 
 ### 9.1 Relaxation ladder
 
-Thu tu level:
+Runtime canonical hien tai khong con relaxation ladder theo orbit signature.
 
-1. `same_orbit_state_and_relative_orbit`
-2. `same_orbit_state_only`
-3. `same_orbit_state_one_scene_min`
-4. `mixed_orbit_allowed`
+Selection duoc co dinh o che do:
 
-Neu `require_same_orbit_direction=true`, level 4 bi bo.
+1. `forced_mixed_orbit_all_pre_post`
 
 ### 9.2 Candidate grouping
 
-Cac item pre/post duoc group theo `signature_mode`:
-
-- `orbit_state_relative_orbit`
-- `orbit_state_only`
-- `mixed`
+Cac item pre/post duoc group theo `signature_mode = mixed`.
 
 Moi signature chung giua pre va post sinh ra 1 candidate pool.
 

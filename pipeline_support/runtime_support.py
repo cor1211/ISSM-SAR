@@ -22,7 +22,6 @@ from runtime_logging import detect_s3_credential_source, normalize_log_level_nam
 WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE = "stac_trainlike_composite"
 WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE = "gee_trainlike_composite"
 SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD = "representative_calendar_period"
-SPATIAL_STRATEGY_WHOLE_AOI = "whole_aoi"
 SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC = "componentized_parent_mosaic"
 
 
@@ -64,9 +63,17 @@ def resolve_workflow_backend(value: Any) -> Optional[str]:
 
 def resolve_spatial_strategy(train_cfg: Optional[Dict[str, Any]]) -> str:
     cfg = train_cfg or {}
-    if bool(cfg.get("componentize_seed_intersections", False)):
-        return SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC
-    return SPATIAL_STRATEGY_WHOLE_AOI
+    if not bool(cfg.get("componentize_seed_intersections", True)):
+        raise ValueError(
+            "Canonical representative runtime requires "
+            "trainlike.componentize_seed_intersections=true; whole_aoi is no longer supported."
+        )
+    if not bool(cfg.get("component_parent_mosaic", True)):
+        raise ValueError(
+            "Canonical representative runtime requires "
+            "trainlike.component_parent_mosaic=true."
+        )
+    return SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC
 
 
 def describe_pipeline_profile(
@@ -719,7 +726,6 @@ def resolve_aoi_source_ref(config: Dict[str, Any], geojson_path: str | Path) -> 
 __all__ = [
     "SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD",
     "SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC",
-    "SPATIAL_STRATEGY_WHOLE_AOI",
     "WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE",
     "WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE",
     "_TeeTextIO",

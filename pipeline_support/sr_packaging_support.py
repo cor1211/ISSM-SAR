@@ -40,8 +40,6 @@ def _infer_sr_collection_name(summary: Dict[str, Any]) -> str:
         return "issm-sar-sr-x2-monthly-component"
     if summary.get("period") is not None:
         return "issm-sar-sr-x2-monthly"
-    if summary.get("anchor") is not None:
-        return "issm-sar-sr-x2-anchor-window"
     return "issm-sar-sr-x2"
 
 
@@ -51,8 +49,6 @@ def _resolve_sr_collection_name(summary: Dict[str, Any]) -> str:
         return os.getenv("SR_COLLECTION_ID_MONTHLY_COMPONENT", inferred)
     if summary.get("period") is not None:
         return os.getenv("SR_COLLECTION_ID_MONTHLY", inferred)
-    if summary.get("anchor") is not None:
-        return os.getenv("SR_COLLECTION_ID_ANCHOR_WINDOW", inferred)
     return os.getenv("SR_COLLECTION_ID_DEFAULT", inferred)
 
 
@@ -92,8 +88,6 @@ def _summary_aoi_id(summary: Dict[str, Any]) -> Optional[str]:
 def _summary_period_token(summary: Dict[str, Any]) -> Optional[str]:
     if summary.get("period"):
         return summary["period"].get("period_id")
-    if summary.get("anchor"):
-        return summary["anchor"].get("anchor_date") or summary["anchor"].get("pair_id")
     return None
 
 
@@ -166,8 +160,6 @@ def _resolve_sr_s3_prefix(summary: Dict[str, Any]) -> str:
         return os.getenv("SR_S3_PREFIX_MONTHLY_COMPONENT", "issm-sar-sr-x2/monthly-component")
     if summary.get("period") is not None:
         return os.getenv("SR_S3_PREFIX_MONTHLY", "issm-sar-sr-x2/monthly")
-    if summary.get("anchor") is not None:
-        return os.getenv("SR_S3_PREFIX_ANCHOR_WINDOW", "issm-sar-sr-x2/anchor-window")
     return os.getenv("SR_S3_PREFIX_DEFAULT", "issm-sar-sr-x2")
 
 
@@ -371,14 +363,6 @@ def write_sr_output_geojson(
         start_datetime = period.get("period_start")
         end_datetime = period.get("period_end")
         pair_id = summary.get("component", {}).get("pair_id") or f"period_{period.get('period_id')}"
-    elif summary.get("anchor"):
-        anchor = summary["anchor"]
-        nominal_datetime = anchor.get("anchor_datetime")
-        pair_id = anchor.get("pair_id")
-        if source_t2:
-            start_datetime = source_t2[0].get("datetime")
-        if source_t1:
-            end_datetime = source_t1[-1].get("datetime")
     item_id = _resolve_sr_item_id(summary, fallback=out_path)
     collection_name = _resolve_sr_collection_name(summary)
     asset_href_mode = os.getenv("SR_ASSET_HREF_MODE", "s3")

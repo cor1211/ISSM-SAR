@@ -20,11 +20,9 @@ Cac helper nay duoc tai su dung boi:
 
 ## 2. Vi sao da don giam module
 
-Luong `GEE exact pair` cu chi phuc vu benchmark/debug, khong nam trong 4 luong chuan hien tai:
+Luong `GEE exact pair` cu chi phuc vu benchmark/debug, khong nam trong 2 luong chuan hien tai:
 
-- `stac + whole_aoi`
 - `stac + componentized_parent_mosaic`
-- `gee + whole_aoi`
 - `gee + componentized_parent_mosaic`
 
 De tranh drift logic va giam rui ro van hanh, phan CLI/selection exact compare da duoc loai khoi core module nay.

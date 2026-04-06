@@ -85,7 +85,6 @@ def _apply_overrides(
 
 PIPELINE_ENV_SPECS: Dict[str, tuple[str, Callable[[str], Any]]] = {
     "PIPELINE_STAC_LIMIT": ("stac.limit", _parse_int),
-    "PIPELINE_REPRESENTATIVE_POOL_MODE": ("trainlike.representative_pool_mode", _parse_text),
     "PIPELINE_MIN_SCENES_PER_HALF": ("trainlike.min_scenes_per_half", _parse_int),
     "PIPELINE_COMPONENT_ITEM_MIN_COVERAGE": ("trainlike.component_item_min_coverage", _parse_float),
     "PIPELINE_COMPONENT_MIN_AREA_RATIO": ("trainlike.component_min_area_ratio", _parse_float),

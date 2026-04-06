@@ -17,7 +17,6 @@ Hien tai module nay chi giu lai cac helper phuc vu luong GEE representative-comp
 
 Nhung ham tren duoc tai su dung boi:
 
-- `sar_pipeline.py` cho `gee + whole_aoi`
 - `sar_pipeline.py` cho `gee + componentized_parent_mosaic`
 - mot so tool canonical can phan tich inventory GEE
 

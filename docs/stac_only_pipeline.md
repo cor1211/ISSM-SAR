@@ -6,7 +6,6 @@
 
 - parity testing
 - spatial logic validation
-- exact pair debug
 - benchmark/QA
 - chuyen lai production sau nay khi inventory du day
 
@@ -38,18 +37,6 @@ Bat khi:
 - `trainlike.selection_strategy = representative_calendar_period`
 
 No la che do can parity voi GEE.
-
-### 3.2 Legacy anchor-driven mode
-
-Bat khi `selection_strategy` khong phai representative-month.
-
-Che do nay van duoc giu vi ly do:
-
-- backward compatibility
-- benchmark cu
-- debug
-
-Nhung no khong phai recipe production ma team dang chot.
 
 ## 4. Luong xu ly representative-month tren STAC
 
@@ -130,16 +117,7 @@ Khi so STAC voi GEE, nen check:
 
 ## 10. Lenh debug STAC huu ich
 
-### 10.1 Exact pair ranking
-
-```bash
-python query_stac_download.py pair \
-  --geojson geojson/generated_aoi/aoi_suite_hanoi_urban_square.geojson \
-  --datetime 2025-01-01/2025-12-31 \
-  --top-k 10
-```
-
-### 10.2 Representative-month pipeline
+### 10.1 Representative-month pipeline
 
 ```bash
 python sar_pipeline.py \

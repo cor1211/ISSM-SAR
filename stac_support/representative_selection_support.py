@@ -21,11 +21,12 @@ from stac_support.stac_item_support import (
 )
 from stac_support.stac_time_support import parse_datetime_utc
 
-_ALLOWED_REPRESENTATIVE_POOL_MODES = {"auto", "orbit_only", "mixed"}
+REPRESENTATIVE_POOL_MODE_MIXED = "mixed"
+_ALLOWED_REPRESENTATIVE_POOL_MODES = {REPRESENTATIVE_POOL_MODE_MIXED}
 
 def normalize_representative_pool_mode(value: Optional[str]) -> str:
     """Normalize representative monthly pool-selection mode."""
-    mode = str(value or "auto").strip().lower()
+    mode = str(value or REPRESENTATIVE_POOL_MODE_MIXED).strip().lower()
     if mode not in _ALLOWED_REPRESENTATIVE_POOL_MODES:
         allowed = ", ".join(sorted(_ALLOWED_REPRESENTATIVE_POOL_MODES))
         raise ValueError(f"Unsupported representative_pool_mode: {value!r}. Expected one of: {allowed}.")
@@ -221,9 +222,9 @@ def select_representative_scene_pools(
     min_scenes_per_half: int,
     auto_relax_inside_period: bool,
     require_same_orbit_direction: bool = False,
-    representative_pool_mode: str = "auto",
+    representative_pool_mode: str = REPRESENTATIVE_POOL_MODE_MIXED,
 ) -> Optional[Dict[str, Any]]:
-    """Select monthly representative scene pools with an in-period relaxation ladder."""
+    """Select monthly representative scene pools using the canonical mixed pool."""
     representative_pool_mode = normalize_representative_pool_mode(representative_pool_mode)
     emit_runtime_log(
         "query_stac_download",
@@ -238,55 +239,18 @@ def select_representative_scene_pools(
         anchor_datetime=anchor_dt.isoformat().replace("+00:00", "Z"),
     )
 
-    default_levels = [
+    if require_same_orbit_direction:
+        raise ValueError(
+            "representative_pool_mode='mixed' cannot be combined with require_same_orbit_direction=True."
+        )
+    levels = [
         {
-            "level": 0,
-            "level_name": "same_orbit_state_and_relative_orbit",
-            "signature_mode": "orbit_state_relative_orbit",
-            "required_scene_count": max(2, int(min_scenes_per_half)),
-        },
-        {
-            "level": 1,
-            "level_name": "same_orbit_state_only",
-            "signature_mode": "orbit_state_only",
-            "required_scene_count": max(2, int(min_scenes_per_half)),
-        },
-        {
-            "level": 2,
-            "level_name": "same_orbit_state_one_scene_min",
-            "signature_mode": "orbit_state_only",
-            "required_scene_count": 1,
-        },
-        {
-            "level": 3,
-            "level_name": "mixed_orbit_allowed",
-            "signature_mode": "mixed",
-            "required_scene_count": 1,
-        },
+            "level": 100,
+            "level_name": "forced_mixed_orbit_all_pre_post",
+            "signature_mode": REPRESENTATIVE_POOL_MODE_MIXED,
+            "required_scene_count": 1 if auto_relax_inside_period else max(1, int(min_scenes_per_half)),
+        }
     ]
-    if representative_pool_mode == "mixed":
-        if require_same_orbit_direction:
-            raise ValueError(
-                "representative_pool_mode='mixed' cannot be combined with require_same_orbit_direction=True."
-            )
-        levels = [
-            {
-                "level": 100,
-                "level_name": "forced_mixed_orbit_all_pre_post",
-                "signature_mode": "mixed",
-                "required_scene_count": max(1, int(min_scenes_per_half)),
-            }
-        ]
-    elif representative_pool_mode == "orbit_only":
-        levels = list(default_levels[:3])
-        if not auto_relax_inside_period:
-            levels = levels[:1]
-    else:
-        levels = list(default_levels)
-        if require_same_orbit_direction:
-            levels = [level for level in levels if level["signature_mode"] != "mixed"]
-        if not auto_relax_inside_period:
-            levels = levels[:1]
 
     for level_cfg in levels:
         candidates = _representative_signature_candidates(

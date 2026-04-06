@@ -84,7 +84,6 @@ from query_stac_download import (
 from pipeline_support.runtime_support import (
     SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD,
     SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC,
-    SPATIAL_STRATEGY_WHOLE_AOI,
     WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE,
     WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
     aoi_manifest_path,
@@ -513,7 +512,7 @@ def select_seed_intersection_component_candidates(
     min_scenes_per_half: int,
     auto_relax_inside_period: bool,
     require_same_orbit_direction: bool,
-    representative_pool_mode: str = "auto",
+    representative_pool_mode: str = "mixed",
     component_item_min_coverage: float,
     component_min_area_ratio: float,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -938,17 +937,6 @@ def write_representative_job_summary(run_dir: Path, summary: Dict[str, Any]) -> 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(build_aoi_record(summary), f, indent=2, ensure_ascii=False)
     return json_path, None
-
-
-def run_stac_representative_whole_aoi_pipeline(
-    config: Dict[str, Any],
-    geojson_path: str,
-    output_root: Optional[str],
-    cache_staging: bool,
-    device: Optional[str],
-) -> Dict[str, Any]:
-    """Canonical STAC representative pipeline for the whole-AOI spatial strategy."""
-    return run_stac_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
 
 
 def run_stac_representative_componentized_pipeline(
@@ -2105,17 +2093,6 @@ def _build_gee_scene_collection(collection_id: str, scene_items: List[Dict[str, 
     return ee.ImageCollection.fromImages(images)
 
 
-def run_gee_representative_whole_aoi_pipeline(
-    config: Dict[str, Any],
-    geojson_path: str,
-    output_root: Optional[str],
-    cache_staging: bool,
-    device: Optional[str],
-) -> Dict[str, Any]:
-    """Canonical GEE representative pipeline for the whole-AOI spatial strategy."""
-    return run_gee_representative_calendar_pipeline(config, geojson_path, output_root, cache_staging, device)
-
-
 def run_gee_representative_componentized_pipeline(
     config: Dict[str, Any],
     geojson_path: str,
@@ -3105,7 +3082,7 @@ def run_stac_trainlike_pipeline(
     cache_staging: bool,
     device: Optional[str],
 ) -> Dict[str, Any]:
-    """Dispatch canonical STAC trainlike requests by spatial strategy."""
+    """Dispatch canonical STAC trainlike requests."""
     train_cfg = config.get("trainlike", {})
     selection_strategy = normalize_selection_strategy(
         train_cfg.get("selection_strategy", SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD),
@@ -3117,14 +3094,6 @@ def run_stac_trainlike_pipeline(
             "trainlike.selection_strategy=representative_calendar_period."
         )
     spatial_strategy = resolve_spatial_strategy(train_cfg)
-    if spatial_strategy == SPATIAL_STRATEGY_WHOLE_AOI:
-        return run_stac_representative_whole_aoi_pipeline(
-            config,
-            geojson_path,
-            output_root,
-            cache_staging,
-            device,
-        )
     if spatial_strategy == SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC:
         return run_stac_representative_componentized_pipeline(
             config,
@@ -3143,7 +3112,7 @@ def run_gee_trainlike_pipeline(
     cache_staging: bool,
     device: Optional[str],
 ) -> Dict[str, Any]:
-    """Dispatch GEE trainlike requests to canonical whole-AOI or componentized wrappers."""
+    """Dispatch canonical GEE trainlike requests."""
     train_cfg = config.get("trainlike", {})
     selection_strategy = normalize_selection_strategy(
         train_cfg.get("selection_strategy", SELECTION_STRATEGY_REPRESENTATIVE_CALENDAR_PERIOD)
@@ -3154,14 +3123,6 @@ def run_gee_trainlike_pipeline(
             "trainlike.selection_strategy=representative_calendar_period."
         )
     spatial_strategy = resolve_spatial_strategy(train_cfg)
-    if spatial_strategy == SPATIAL_STRATEGY_WHOLE_AOI:
-        return run_gee_representative_whole_aoi_pipeline(
-            config,
-            geojson_path,
-            output_root,
-            cache_staging,
-            device,
-        )
     if spatial_strategy == SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC:
         return run_gee_representative_componentized_pipeline(
             config,
@@ -3674,18 +3635,6 @@ def main() -> None:
     parser.add_argument("--min-delta-hours", type=float, default=None, help="Override minimum time delta")
     parser.add_argument("--max-delta-days", type=int, default=None, help="Override maximum time delta")
     parser.add_argument("--min-aoi-coverage", type=float, default=None, help="Override minimum AOI geometry coverage; hard gate is coverage > threshold")
-    parser.add_argument("--same-orbit-direction", action="store_true", help="Require same orbit direction within the train-like selection logic")
-    parser.add_argument(
-        "--representative-pool-mode",
-        choices=["auto", "orbit_only", "mixed"],
-        default=None,
-        help=(
-            "Override representative monthly pre/post pool selection. "
-            "`auto` keeps the existing relaxation ladder, "
-            "`orbit_only` never relaxes into mixed-orbit pools, "
-            "`mixed` forces one shared pre/post pool regardless of orbit grouping."
-        ),
-    )
     parser.add_argument("--auto-relax", action="store_true", help="Enable balanced/loose time window fallback")
     parser.add_argument("--window-before-days", type=float, default=None, help="Override STAC train-like pre-window length")
     parser.add_argument("--window-after-days", type=float, default=None, help="Override STAC train-like post-window length")
@@ -3781,11 +3730,6 @@ def main() -> None:
         config["pairing"]["max_delta_days"] = args.max_delta_days
     if args.min_aoi_coverage is not None:
         config["pairing"]["min_aoi_coverage"] = args.min_aoi_coverage
-    if args.same_orbit_direction:
-        config["pairing"]["same_orbit_direction"] = True
-        config["trainlike"]["same_orbit_direction"] = True
-    if args.representative_pool_mode is not None:
-        config["trainlike"]["representative_pool_mode"] = args.representative_pool_mode
     if args.auto_relax:
         config["pairing"]["auto_relax"] = True
     if args.window_before_days is not None:
