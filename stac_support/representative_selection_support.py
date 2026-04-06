@@ -294,8 +294,6 @@ def select_representative_scene_pools(
             required_scene_count=level_cfg["required_scene_count"],
             pre_scene_count=chosen["pre_scene_count"],
             post_scene_count=chosen["post_scene_count"],
-            pre_ids=[scene.get("id") for scene in chosen["pre_scenes"]],
-            post_ids=[scene.get("id") for scene in chosen["post_scenes"]],
         )
         return chosen
     emit_runtime_log(

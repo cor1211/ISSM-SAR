@@ -31,6 +31,7 @@ from pipeline_support.contract_support import (
     attach_run_log_path,
     build_aoi_record,
     build_period_record,
+    classify_failure_reason,
 )
 from pipeline_support.json_support import compact_jsonable
 from query_stac_download import (
@@ -60,6 +61,7 @@ from pipeline_support.runtime_support import (
     WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE,
     WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
     _TeeTextIO,
+    aoi_manifest_path,
     aoi_log_path,
     aoi_summary_paths,
     apply_runtime_env_overrides,
@@ -651,10 +653,6 @@ def select_seed_intersection_component_candidates(
         candidate_record["why_kept"] = (
             "Kept because the child passed coverage checks and retained a valid representative pre/post scene pool."
         )
-        candidate_record["human_summary"] = (
-            f"Selected child region with {selection.get('pre_scene_count')} pre scenes and "
-            f"{selection.get('post_scene_count')} post scenes."
-        )
         candidate_record["decision_summary"] = _component_selection_decision_summary(candidate_record)
         successful.append(candidate_record)
 
@@ -690,10 +688,6 @@ def select_seed_intersection_component_candidates(
                     "containment_tolerance_m2": metrics["tolerance_m2"],
                     "why_rejected": "Suppressed because a larger child already covered this region within tolerance.",
                     "reason_message": "Suppressed because a larger child already covered this region within tolerance.",
-                    "human_summary": (
-                        "Suppressed as a near-nested child because an earlier larger child already "
-                        "covered the same region within geometric tolerance."
-                    ),
                 }
             )
             emit_pipeline_log(
@@ -737,7 +731,6 @@ def select_seed_intersection_component_candidates(
                 str((rejected_candidate.get("reject_reasons") or ["REJECTED_COMPONENT_CANDIDATE"])[0]),
             )
             rejected_candidate.setdefault("reason_message", rejected_candidate["why_rejected"])
-            rejected_candidate.setdefault("human_summary", rejected_candidate["why_rejected"])
             continue
         suppressed_by_key = rejected_candidate.get("suppressed_by_region_key")
         if suppressed_by_key in component_id_by_region_key:
@@ -1280,10 +1273,6 @@ def run_stac_representative_calendar_pipeline(
                             rejected_components=rejected_components,
                         ),
                     "rejected_component_candidates": rejected_components,
-                    "human_summary": (
-                        "No child component survived selection, so the representative period was skipped "
-                        "before parent mosaic execution."
-                    ),
                 }
                 summary_json, summary_md = write_representative_period_summary(period_dir, period_summary)
                 period_results.append(
@@ -1436,7 +1425,6 @@ def run_stac_representative_calendar_pipeline(
                         "geometry": component_geometry,
                         "bbox": component_bbox,
                         "why_kept": component.get("why_kept"),
-                        "human_summary": component.get("human_summary"),
                         "decision_summary": component.get("decision_summary"),
                         "selection": {
                             "selection_priority": child_manifest.get("selection_priority", "balanced_period_representation"),
@@ -1563,12 +1551,6 @@ def run_stac_representative_calendar_pipeline(
                         "new_pixel_ratio": component_record["new_pixel_ratio"],
                     }
                 )
-                component_record["human_summary"] = (
-                    f"Child kept with {component_record['pre_scene_count']} pre scenes and "
-                    f"{component_record['post_scene_count']} post scenes; "
-                    f"{'contributed new parent pixels' if contributed else 'did not add new parent pixels after largest-first mosaic'}."
-                )
-
             suppressed_component_count = _suppressed_component_count(rejected_components)
             period_summary = {
                 "status": "completed",
@@ -1647,11 +1629,6 @@ def run_stac_representative_calendar_pipeline(
                     "save_debug_artifacts": save_debug_artifacts,
                     **build_final_output_trace_config(out_cfg),
                 },
-                "human_summary": (
-                    f"Processed {len(component_results)} child components after suppressing "
-                    f"{suppressed_component_count} near-nested candidates. Parent mosaic used largest-first ordering "
-                    f"and received new pixels from {len(parent_mosaic['contributing_component_ids'])} child components."
-                ),
             }
             if compatibility_info is not None:
                 period_summary["compatibility"] = compatibility_info
@@ -1670,7 +1647,6 @@ def run_stac_representative_calendar_pipeline(
                 public_item_id=public_item_id,
                 completed_component_count=len(component_results),
                 suppressed_component_count=suppressed_component_count,
-                contributing_component_ids=parent_mosaic["contributing_component_ids"],
             )
             period_results.append(
                 {
@@ -1965,10 +1941,6 @@ def run_gee_representative_calendar_pipeline(
                         rejected_components=rejected_components,
                     ),
                     "rejected_component_candidates": rejected_components,
-                    "human_summary": (
-                        "No child component survived selection, so the representative period was skipped "
-                        "before parent mosaic execution."
-                    ),
                 }
                 summary_json, summary_md = write_representative_period_summary(period_dir, period_summary)
                 period_results.append(
@@ -2124,7 +2096,6 @@ def run_gee_representative_calendar_pipeline(
                         "geometry": component_geometry,
                         "bbox": component_bbox,
                         "why_kept": component.get("why_kept"),
-                        "human_summary": component.get("human_summary"),
                         "decision_summary": component.get("decision_summary"),
                         "validation": validation,
                         "selection": {
@@ -2236,12 +2207,6 @@ def run_gee_representative_calendar_pipeline(
                         "new_pixel_ratio": component_record["new_pixel_ratio"],
                     }
                 )
-                component_record["human_summary"] = (
-                    f"Child kept with {component_record['pre_scene_count']} pre scenes and "
-                    f"{component_record['post_scene_count']} post scenes; "
-                    f"{'contributed new parent pixels' if contributed else 'did not add new parent pixels after largest-first mosaic'}."
-                )
-
             suppressed_component_count = _suppressed_component_count(rejected_components)
             period_summary = {
                 "status": "completed",
@@ -2319,11 +2284,6 @@ def run_gee_representative_calendar_pipeline(
                     "save_debug_artifacts": save_debug_artifacts,
                     **build_final_output_trace_config(out_cfg),
                 },
-                "human_summary": (
-                    f"Processed {len(component_results)} child components after suppressing "
-                    f"{suppressed_component_count} near-nested candidates. Parent mosaic used largest-first ordering "
-                    f"and received new pixels from {len(parent_mosaic['contributing_component_ids'])} child components."
-                ),
             }
             if compatibility_info is not None:
                 period_summary["compatibility"] = compatibility_info
@@ -2342,7 +2302,6 @@ def run_gee_representative_calendar_pipeline(
                 public_item_id=public_item_id,
                 completed_component_count=len(component_results),
                 suppressed_component_count=suppressed_component_count,
-                contributing_component_ids=parent_mosaic["contributing_component_ids"],
             )
             period_results.append(
                 {
