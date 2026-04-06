@@ -119,23 +119,6 @@ def collect_items_with_filters(
         raise ValueError("Can --bbox hoac --geojson de xac dinh AOI.")
     aoi_geometry = intersects or bbox_to_geometry(bbox)
 
-    temporal_items_count: Optional[int] = None
-    if intersects is not None:
-        temporal_only_items = client.search_items(
-            collection=args.collection,
-            datetime_range=args.datetime,
-            limit=args.limit,
-        )
-        temporal_items_count = len(temporal_only_items)
-        emit_runtime_log(
-            "query_stac_download",
-            logging.INFO,
-            "Temporal-only STAC query completed",
-            collection=args.collection,
-            datetime=args.datetime,
-            temporal_items=temporal_items_count,
-        )
-
     items = client.search_items(
         collection=args.collection,
         bbox=bbox,
@@ -146,11 +129,10 @@ def collect_items_with_filters(
     emit_runtime_log(
         "query_stac_download",
         logging.INFO,
-        "Spatial STAC query completed",
+        "Combined temporal+spatial STAC query completed",
         collection=args.collection,
         datetime=args.datetime,
-        spatial_items=len(items),
-        temporal_items=temporal_items_count,
+        matched_items=len(items),
         bbox=bbox,
         used_intersects=bool(intersects),
     )
@@ -168,8 +150,7 @@ def collect_items_with_filters(
         "query_stac_download",
         logging.INFO,
         "STAC query pipeline counts",
-        temporal_items=temporal_items_count,
-        spatial_items=len(items),
+        matched_items=len(items),
         hard_filtered_items=len(filtered),
     )
     return filtered, bbox, aoi_geometry

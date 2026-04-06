@@ -17,8 +17,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from pathlib import Path
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -132,50 +130,6 @@ def cmd_list(args: argparse.Namespace) -> None:
         print(f"[{key}] pol={pol or '?'} type={media}")
         print(f"  href={href}")
 
-def cmd_download(args: argparse.Namespace) -> None:
-    """Tai 1 cap T1/T2 cu the theo item ID."""
-    client = STACClient(args.stac_url)
-    print(f"[1/3] Lay item T1: {args.t1_id}")
-    t1_item = client.get_item(args.collection, args.t1_id)
-    print(f"[2/3] Lay item T2: {args.t2_id}")
-    t2_item = client.get_item(args.collection, args.t2_id)
-
-    if not t1_item or not t2_item:
-        print("[Loi] Khong tim thay mot hoac ca hai items tren STAC.")
-        return
-
-    t1_info = extract_item_info(t1_item)
-    t2_info = extract_item_info(t2_item)
-    try:
-        downloader = S3Downloader()
-    except RuntimeError as e:
-        print(f"[Loi] {e}")
-        return
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    asset_keys = args.asset_keys.split(",") if args.asset_keys else None
-
-    print("\n[3/3] Download T1 assets")
-    downloader.download_item_assets(t1_info["assets"], str(out_dir), f"{args.t1_prefix}{t1_info['id']}", asset_keys)
-
-    print("\nDownload T2 assets")
-    downloader.download_item_assets(t2_info["assets"], str(out_dir), f"{args.t2_prefix}{t2_info['id']}", asset_keys)
-
-    print(f"\nOK. Du lieu luu tai: {out_dir.resolve()}")
-
-def cmd_download_href(args: argparse.Namespace) -> None:
-    """Tai truc tiep 1 href."""
-    try:
-        downloader = S3Downloader()
-    except RuntimeError as e:
-        print(f"[Loi] {e}")
-        return
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    filename = args.filename or Path(urlparse(args.href).path).name
-    local_path = str(out_dir / filename)
-    downloader.download_from_href(args.href, local_path)
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="STAC Query + Runtime Support + S3 Utilities cho ISSM_SAR",
@@ -196,23 +150,6 @@ def main() -> None:
     p_list = subparsers.add_parser("list", help="Liet ke item STAC phu hop")
     add_common_args(p_list)
     p_list.set_defaults(func=cmd_list)
-
-    p_dl = subparsers.add_parser("download", help="Tai cap T1/T2 bang item IDs")
-    p_dl.add_argument("--stac-url", default=DEFAULT_STAC_API, help="STAC API URL (required if STAC_API_URL is not set)")
-    p_dl.add_argument("--collection", default=DEFAULT_COLLECTION)
-    p_dl.add_argument("--t1-id", required=True, help="STAC item ID cho T1")
-    p_dl.add_argument("--t2-id", required=True, help="STAC item ID cho T2")
-    p_dl.add_argument("--out-dir", default="data/input", help="Thu muc luu")
-    p_dl.add_argument("--t1-prefix", default="s1t1_", help="Prefix filename T1")
-    p_dl.add_argument("--t2-prefix", default="s1t2_", help="Prefix filename T2")
-    p_dl.add_argument("--asset-keys", default=None, help="Chi tai cac asset keys, VD: vv,vh")
-    p_dl.set_defaults(func=cmd_download)
-
-    p_href = subparsers.add_parser("download-href", help="Tai truc tiep 1 href")
-    p_href.add_argument("href", help="s3://bucket/key hoac http(s)://...")
-    p_href.add_argument("--out-dir", default="data/input", help="Thu muc luu")
-    p_href.add_argument("--filename", default=None, help="Ten file local")
-    p_href.set_defaults(func=cmd_download_href)
 
     args = parser.parse_args()
     if not args.command:

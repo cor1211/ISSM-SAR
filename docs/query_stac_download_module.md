@@ -237,10 +237,6 @@ Cac command huu ich:
 
 - `list`
   - xem items sau hard filter
-- `download`
-  - tai cap asset theo item IDs da biet
-- `download-href`
-  - tai truc tiep mot href khi can debug ket noi hoac kiem tra asset
 
 ## 13. Ket luan operational
 
