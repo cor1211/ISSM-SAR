@@ -9,31 +9,17 @@ import argparse
 import copy
 import json
 import logging
-import math
 import os
-import shutil
 import sys
 import tempfile
-import warnings
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
-import rasterio
-from affine import Affine
-from pyproj import Geod, Transformer
-from rasterio.enums import Resampling
-from rasterio.features import rasterize
-from rasterio.shutil import copy as rio_copy
-from rasterio.transform import array_bounds
-from rasterio.warp import calculate_default_transform, reproject, transform_geom
-from scipy.ndimage import median_filter
-from shapely.geometry import mapping, shape
-from shapely.ops import unary_union
-import yaml
+from shapely.geometry import shape
 
 from db_aoi_source import (
     fetch_active_aois_from_database,
@@ -41,21 +27,12 @@ from db_aoi_source import (
     normalize_aoi_uuid,
 )
 from pipeline_support.contract_support import (
-    DEFAULT_MAX_RETRY_ATTEMPTS,
     apply_execution_contract,
     attach_run_log_path,
     build_aoi_record,
-    build_period_manifest_from_summary,
     build_period_record,
-    build_run_manifest,
-    classify_failure_reason,
-    classify_skip_reason_code,
-    has_only_suppressed_component_rejections,
-    infer_completion_class,
-    normalize_runtime_record,
-    write_period_manifest_from_summary,
 )
-from pipeline_support.json_support import compact_jsonable, to_jsonable
+from pipeline_support.json_support import compact_jsonable
 from query_stac_download import (
     DEFAULT_COLLECTION,
     DEFAULT_STAC_API,
@@ -84,7 +61,6 @@ from pipeline_support.runtime_support import (
     WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
     _TeeTextIO,
     aoi_log_path,
-    aoi_manifest_path,
     aoi_summary_paths,
     apply_runtime_env_overrides,
     build_effective_runtime_settings,
@@ -92,11 +68,8 @@ from pipeline_support.runtime_support import (
     build_startup_checks,
     capture_runtime_job_logs,
     collect_runtime_aoi_entry,
-    copy_input_geojson_to_runtime,
-    debug_dir,
     describe_pipeline_profile,
     ensure_dir,
-    infer_effective_input_profile,
     infer_job_dir_from_runtime_path,
     inputs_dir,
     intermediate_dir,
@@ -104,7 +77,6 @@ from pipeline_support.runtime_support import (
     is_representative_composite_workflow_mode,
     job_log_path,
     job_summary_path,
-    load_json_if_exists,
     load_yaml,
     model_trainlike_semantics,
     normalize_selection_strategy,
@@ -114,22 +86,17 @@ from pipeline_support.runtime_support import (
     prepare_storage_aoi_layout,
     prepare_storage_job_layout,
     resolve_aoi_source_ref,
-    resolve_optional_debug_dir,
     resolve_pipeline_run_dir,
     resolve_runtime_aoi_id,
     resolve_spatial_strategy,
-    resolve_workflow_backend,
     runtime_relpath,
     save_debug_artifacts_enabled,
-    strip_debug_artifact_paths,
 )
 from pipeline_support.raster_support import (
     align_single_band_to_grid,
     apply_focal_median_db,
     apply_geometry_mask_to_multiband,
-    build_circular_footprint,
     build_grid_meta,
-    build_sr_grid_from_input_grid,
     build_target_grid,
     dedupe_items_by_scene,
     export_masked_sr_band_cogs,
@@ -137,30 +104,23 @@ from pipeline_support.raster_support import (
     mosaic_component_sr_multibands_to_parent,
     nanmedian_stack,
     resolve_resampling,
-    write_geojson,
-    write_geometry_mask_like_raster,
-    write_geometry_mask_tif,
     write_multiband_geotiff,
 )
 from pipeline_support.sr_packaging_support import (
-    _resolve_sr_href,
-    _resolve_sr_root_links,
     _summary_aoi_id,
     _summary_period_token,
     _whole_monthly_sr_item_id,
     attach_sr_output_geojson,
-    write_sr_output_geojson,
 )
 from runtime_logging import (
     configure_root_logging,
-    detect_s3_credential_source,
     DEFAULT_LOG_LEVEL,
     ensure_root_logging,
     emit_runtime_log,
     normalize_log_level_name,
     resolve_runtime_log_level,
 )
-from runtime_env_overrides import apply_inference_env_overrides, apply_pipeline_env_overrides
+from runtime_env_overrides import apply_inference_env_overrides
 
 ensure_root_logging(DEFAULT_LOG_LEVEL)
 logger = logging.getLogger("sar_pipeline")
