@@ -31,7 +31,7 @@ class STACClient:
     ) -> List[Dict[str, Any]]:
         """Query STAC /search, then fallback to GET /search, then collection items."""
         datetime_range = normalize_datetime_range(datetime_range)
-        search_url = f"{self.api_url}/search"
+        search_url = f"{self.api_url}/searchh"
         base_payload: Dict[str, Any] = {
             "collections": [collection],
             "limit": max(1, int(limit)),

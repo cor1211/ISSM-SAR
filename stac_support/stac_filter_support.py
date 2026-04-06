@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from runtime_logging import emit_runtime_log
 from stac_support.stac_client_support import STACClient
-from stac_support.stac_geometry_support import load_geojson_aoi
+from stac_support.stac_geometry_support import annotate_items_for_aoi, bbox_to_geometry, load_geojson_aoi
 from stac_support.stac_item_support import extract_item_info, select_asset_href
 
 logger = logging.getLogger("query_stac_download")

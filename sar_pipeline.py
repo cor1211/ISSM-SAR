@@ -86,6 +86,8 @@ from pipeline_support.runtime_support import (
     SPATIAL_STRATEGY_COMPONENTIZED_PARENT_MOSAIC,
     WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE,
     WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
+    _TeeTextIO,
+    aoi_log_path,
     aoi_manifest_path,
     aoi_summary_paths,
     apply_runtime_env_overrides,
