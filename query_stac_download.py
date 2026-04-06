@@ -32,7 +32,6 @@ from runtime_logging import emit_runtime_log
 from stac_support.s3_download_support import (
     build_rasterio_env_kwargs,
     href_to_rasterio_path,
-    probe_rasterio_href,
 )
 from stac_support.stac_client_support import STACClient
 from stac_support.stac_filter_support import (
@@ -204,7 +203,6 @@ __all__ = [
     "parse_datetime_utc",
     "parse_finite_datetime_range",
     "parse_required_pols",
-    "probe_rasterio_href",
     "resolve_spatial_filter",
     "scene_datetime_values",
     "select_asset_href",

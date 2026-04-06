@@ -37,7 +37,6 @@ import yaml
 
 from db_aoi_source import (
     fetch_active_aois_from_database,
-    inspect_database_settings,
     materialize_database_aoi_geojson,
     normalize_aoi_uuid,
 )
@@ -65,15 +64,12 @@ from query_stac_download import (
     build_representative_period_manifest,
     canonical_bbox_from_geometry,
     collect_items_with_filters,
-    collect_items_covering_region,
     collect_period_half_items,
     expand_month_periods,
     extract_item_info,
     geodesic_area_wgs84,
     build_seed_intersection_region_candidates,
-    item_scene_key,
     load_geojson_aoi,
-    normalize_polygonal_geojson_geometry,
     normalize_polygonal_shapely_geometry,
     normalize_representative_pool_mode,
     normalize_datetime_range,

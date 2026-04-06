@@ -87,97 +87,6 @@ class S3Downloader:
             return None
         return "/".join(pieces[-max(1, int(parts)):])
 
-    def download_from_href(self, href: str, local_path: str) -> bool:
-        """Tai file tu href ve local_path."""
-        parsed = self.parse_href_to_bucket_key(href)
-        if not parsed:
-            emit_runtime_log(
-                "query_stac_download",
-                logging.ERROR,
-                "Failed to parse asset href for download",
-                href=href,
-                local_path=local_path,
-            )
-            return False
-        bucket, key = parsed
-
-        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-        emit_runtime_log(
-            "query_stac_download",
-            logging.INFO,
-            "Starting S3 asset download",
-            href=href,
-            bucket=bucket,
-            key=key,
-            local_path=local_path,
-        )
-
-        try:
-            head = self.client.head_object(Bucket=bucket, Key=key)
-            size_mb = head["ContentLength"] / (1024 * 1024)
-            emit_runtime_log(
-                "query_stac_download",
-                logging.INFO,
-                "Resolved S3 object metadata",
-                bucket=bucket,
-                key=key,
-                size_mb=f"{size_mb:.1f}",
-            )
-
-            local_file = Path(local_path)
-            if local_file.exists() and local_file.stat().st_size == int(head["ContentLength"]):
-                emit_runtime_log(
-                    "query_stac_download",
-                    logging.INFO,
-                    "Skipping download because local file already matches remote size",
-                    bucket=bucket,
-                    key=key,
-                    local_path=local_path,
-                )
-                return True
-
-            downloaded = [0]
-            total_size = max(1, int(head["ContentLength"]))
-            progress_state = {"last_print": -5}
-
-            def progress(bytes_amount: int) -> None:
-                downloaded[0] += bytes_amount
-                pct = downloaded[0] / total_size * 100
-                bucket_pct = int(pct // 5) * 5
-                if bucket_pct > progress_state["last_print"]:
-                    progress_state["last_print"] = bucket_pct
-                    emit_runtime_log(
-                        "query_stac_download",
-                        logging.DEBUG,
-                        "S3 download progress",
-                        bucket=bucket,
-                        key=key,
-                        progress_pct=f"{pct:.1f}",
-                    )
-
-            self.client.download_file(bucket, key, local_path, Callback=progress)
-            emit_runtime_log(
-                "query_stac_download",
-                logging.INFO,
-                "Completed S3 asset download",
-                bucket=bucket,
-                key=key,
-                local_path=local_path,
-            )
-            return True
-        except Exception as e:
-            emit_runtime_log(
-                "query_stac_download",
-                logging.ERROR,
-                "S3 asset download failed",
-                href=href,
-                bucket=bucket,
-                key=key,
-                local_path=local_path,
-                error=e,
-            )
-            return False
-
     def download_aoi_subset_from_href(
         self,
         href: str,
@@ -327,37 +236,6 @@ class S3Downloader:
             )
             return False
 
-    def download_item_assets(
-        self,
-        assets: Dict[str, Any],
-        out_dir: str,
-        item_id: str,
-        asset_keys: Optional[List[str]] = None,
-    ) -> List[str]:
-        """Tai cac asset key can thiet cua 1 item."""
-        downloaded_paths: List[str] = []
-        keys = asset_keys or list(assets.keys())
-        for key in keys:
-            if key not in assets:
-                emit_runtime_log(
-                    "query_stac_download",
-                    logging.WARNING,
-                    "Requested asset key is missing from STAC item",
-                    asset_key=key,
-                    item_id=item_id,
-                )
-                continue
-            asset = assets[key]
-            href = str(asset.get("href", ""))
-            if not href:
-                continue
-
-            ext = Path(urlparse(href).path).suffix or ".tif"
-            local_path = str(Path(out_dir) / f"{item_id}_{key}{ext}")
-            if self.download_from_href(href, local_path):
-                downloaded_paths.append(local_path)
-        return downloaded_paths
-
 def href_to_rasterio_path(href: str) -> str:
     """Chuyen href thanh duong dan GDAL VSI neu can."""
     parsed = urlparse(href)
@@ -382,36 +260,3 @@ def build_rasterio_env_kwargs() -> Dict[str, Any]:
         env["AWS_VIRTUAL_HOSTING"] = "FALSE"
 
     return env
-
-def probe_rasterio_href(label: str, href: str) -> bool:
-    """Thu mo href bang rasterio va in metadata chinh."""
-    parsed = urlparse(href)
-    if parsed.scheme == "s3" and boto3 is None:
-        print(f"[RASTERIO] {label} -> Loi: can cai boto3 de doc authenticated s3:// href")
-        return False
-
-    raster_path = href_to_rasterio_path(href)
-    env_kwargs = build_rasterio_env_kwargs()
-    try:
-        access_key = os.getenv("S3_ACCESS_KEY")
-        secret_key = os.getenv("S3_SECRET_KEY")
-        aws_session = None
-        if boto3 is not None and access_key and secret_key:
-            b3_session = boto3.Session(
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-            )
-            aws_session = AWSSession(b3_session)
-
-        env = rasterio.Env(session=aws_session, **env_kwargs) if aws_session is not None else rasterio.Env(**env_kwargs)
-        with env:
-            with rasterio.open(raster_path, "r") as src:
-                print(f"[RASTERIO] {label}")
-                print(f"  path: {raster_path}")
-                print(f"  size: {src.width}x{src.height}, bands={src.count}, dtype={src.dtypes[0]}")
-                print(f"  crs: {src.crs}")
-                print(f"  transform: {src.transform}")
-        return True
-    except Exception as e:
-        print(f"[RASTERIO] {label} -> Loi: {e}")
-        return False
