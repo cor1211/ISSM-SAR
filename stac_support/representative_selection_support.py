@@ -58,13 +58,7 @@ def collect_period_half_items(
     return pre_items, post_items
 
 def _group_signature(info: Dict[str, Any], mode: str) -> Tuple[str, ...]:
-    orbit_state = str(info.get("orbit_state") or "").lower() or "unknown"
-    rel_orbit = "" if info.get("relative_orbit") is None else str(info["relative_orbit"])
-    if mode == "orbit_state_relative_orbit":
-        return (orbit_state, rel_orbit)
-    if mode == "orbit_state_only":
-        return (orbit_state,)
-    if mode == "mixed":
+    if mode == REPRESENTATIVE_POOL_MODE_MIXED:
         return ("mixed",)
     raise ValueError(f"Unsupported representative signature mode: {mode}")
 

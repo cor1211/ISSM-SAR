@@ -460,6 +460,59 @@ def _component_selection_decision_summary(component: Dict[str, Any], *, contribu
     return compact_jsonable(summary)
 
 
+def _suppressed_component_count(rejected_components: List[Dict[str, Any]]) -> int:
+    return sum(1 for item in rejected_components if item.get("status") == "suppressed")
+
+
+def _build_component_skip_componentization(
+    *,
+    component_item_min_coverage: float,
+    component_min_area_ratio: float,
+    rejected_components: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    suppressed_count = _suppressed_component_count(rejected_components)
+    return {
+        "enabled": True,
+        "mode": "seed_item_intersections",
+        "delivery_mode": "parent_mosaic",
+        "item_min_region_coverage": component_item_min_coverage,
+        "min_area_ratio": component_min_area_ratio,
+        "completed_component_count": 0,
+        "rejected_component_count": len(rejected_components),
+        "suppressed_component_count": suppressed_count,
+        "parent_supported_area_ratio": 0.0,
+        "parent_mosaic_ordering": "largest_first",
+        "decision_summary": {
+            "suppression_policy": "largest_first_tolerant_nested_pruning",
+            "suppressed_component_count": suppressed_count,
+            "completed_component_count": 0,
+            "parent_mosaic_ordering": "largest_first",
+        },
+    }
+
+
+def _build_period_counts(period_results: List[Dict[str, Any]]) -> Dict[str, int]:
+    return {
+        "total": len(period_results),
+        "completed": sum(1 for p in period_results if p["status"] == "completed"),
+        "skipped": sum(1 for p in period_results if p["status"] == "skipped"),
+        "failed": sum(1 for p in period_results if p["status"] == "failed"),
+    }
+
+
+def _finalize_representative_job_summary(
+    run_dir: Path,
+    summary: Dict[str, Any],
+    compatibility_info: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if compatibility_info is not None:
+        summary["compatibility"] = compatibility_info
+    summary_json, summary_md = write_representative_job_summary(run_dir, summary)
+    summary["summary_json"] = str(summary_json)
+    summary["summary_md"] = (str(summary_md) if summary_md else None)
+    return summary
+
+
 def select_seed_intersection_component_candidates(
     *,
     pre_items: List[Dict[str, Any]],
@@ -1069,12 +1122,7 @@ def run_stac_representative_calendar_pipeline(
             "run_dir": str(run_dir),
             "periods_dir": str(periods_root),
             "items_after_hard_filter": 0,
-            "period_counts": {
-                "total": len(periods),
-                "completed": 0,
-                "skipped": len(periods),
-                "failed": 0,
-            },
+            "period_counts": _build_period_counts(period_results),
             "period_results": period_results,
             "skip_reason": skip_reason,
             "run_config": {
@@ -1100,12 +1148,7 @@ def run_stac_representative_calendar_pipeline(
                 **build_final_output_trace_config(out_cfg),
             },
         }
-        if compatibility_info is not None:
-            summary["compatibility"] = compatibility_info
-        summary_json, summary_md = write_representative_job_summary(run_dir, summary)
-        summary["summary_json"] = str(summary_json)
-        summary["summary_md"] = (str(summary_md) if summary_md else None)
-        return summary
+        return _finalize_representative_job_summary(run_dir, summary, compatibility_info)
 
     target_crs = str(train_cfg.get("target_crs", "EPSG:3857"))
     target_resolution = float(train_cfg.get("target_resolution", 10.0))
@@ -1231,28 +1274,11 @@ def run_stac_representative_calendar_pipeline(
                     },
                     "skip_reason": skip_reason,
                     "manifest_path": str(manifest_path),
-                    "componentization": {
-                        "enabled": True,
-                        "mode": "seed_item_intersections",
-                        "delivery_mode": "parent_mosaic",
-                        "item_min_region_coverage": component_item_min_coverage,
-                        "min_area_ratio": component_min_area_ratio,
-                        "completed_component_count": 0,
-                        "rejected_component_count": len(rejected_components),
-                        "suppressed_component_count": sum(
-                            1 for item in rejected_components if item.get("status") == "suppressed"
+                        "componentization": _build_component_skip_componentization(
+                            component_item_min_coverage=component_item_min_coverage,
+                            component_min_area_ratio=component_min_area_ratio,
+                            rejected_components=rejected_components,
                         ),
-                        "parent_supported_area_ratio": 0.0,
-                        "parent_mosaic_ordering": "largest_first",
-                        "decision_summary": {
-                            "suppression_policy": "largest_first_tolerant_nested_pruning",
-                            "suppressed_component_count": sum(
-                                1 for item in rejected_components if item.get("status") == "suppressed"
-                            ),
-                            "completed_component_count": 0,
-                            "parent_mosaic_ordering": "largest_first",
-                        },
-                    },
                     "rejected_component_candidates": rejected_components,
                     "human_summary": (
                         "No child component survived selection, so the representative period was skipped "
@@ -1543,7 +1569,7 @@ def run_stac_representative_calendar_pipeline(
                     f"{'contributed new parent pixels' if contributed else 'did not add new parent pixels after largest-first mosaic'}."
                 )
 
-            suppressed_component_count = sum(1 for item in rejected_components if item.get("status") == "suppressed")
+            suppressed_component_count = _suppressed_component_count(rejected_components)
             period_summary = {
                 "status": "completed",
                 "workflow_mode": "stac_trainlike_composite",
@@ -1684,12 +1710,7 @@ def run_stac_representative_calendar_pipeline(
         "run_dir": str(run_dir),
         "periods_dir": str(periods_root),
         "items_after_hard_filter": len(items),
-        "period_counts": {
-            "total": len(periods),
-            "completed": sum(1 for p in period_results if p["status"] == "completed"),
-            "skipped": sum(1 for p in period_results if p["status"] == "skipped"),
-            "failed": sum(1 for p in period_results if p["status"] == "failed"),
-        },
+        "period_counts": _build_period_counts(period_results),
         "period_results": period_results,
         "run_config": {
             "stac_url": stac_cfg.get("url", DEFAULT_STAC_API),
@@ -1720,12 +1741,7 @@ def run_stac_representative_calendar_pipeline(
             **build_final_output_trace_config(out_cfg),
         },
     }
-    if compatibility_info is not None:
-        summary["compatibility"] = compatibility_info
-    summary_json, summary_md = write_representative_job_summary(run_dir, summary)
-    summary["summary_json"] = str(summary_json)
-    summary["summary_md"] = (str(summary_md) if summary_md else None)
-    return summary
+    return _finalize_representative_job_summary(run_dir, summary, compatibility_info)
 
 
 def _build_gee_scene_collection(collection_id: str, scene_items: List[Dict[str, Any]]) -> Any:
@@ -1943,28 +1959,11 @@ def run_gee_representative_calendar_pipeline(
                     },
                     "skip_reason": skip_reason,
                     "manifest_path": str(manifest_path),
-                    "componentization": {
-                        "enabled": True,
-                        "mode": "seed_item_intersections",
-                        "delivery_mode": "parent_mosaic",
-                        "item_min_region_coverage": component_item_min_coverage,
-                        "min_area_ratio": component_min_area_ratio,
-                        "completed_component_count": 0,
-                        "rejected_component_count": len(rejected_components),
-                        "suppressed_component_count": sum(
-                            1 for item in rejected_components if item.get("status") == "suppressed"
-                        ),
-                        "parent_supported_area_ratio": 0.0,
-                        "parent_mosaic_ordering": "largest_first",
-                        "decision_summary": {
-                            "suppression_policy": "largest_first_tolerant_nested_pruning",
-                            "suppressed_component_count": sum(
-                                1 for item in rejected_components if item.get("status") == "suppressed"
-                            ),
-                            "completed_component_count": 0,
-                            "parent_mosaic_ordering": "largest_first",
-                        },
-                    },
+                    "componentization": _build_component_skip_componentization(
+                        component_item_min_coverage=component_item_min_coverage,
+                        component_min_area_ratio=component_min_area_ratio,
+                        rejected_components=rejected_components,
+                    ),
                     "rejected_component_candidates": rejected_components,
                     "human_summary": (
                         "No child component survived selection, so the representative period was skipped "
@@ -2243,7 +2242,7 @@ def run_gee_representative_calendar_pipeline(
                     f"{'contributed new parent pixels' if contributed else 'did not add new parent pixels after largest-first mosaic'}."
                 )
 
-            suppressed_component_count = sum(1 for item in rejected_components if item.get("status") == "suppressed")
+            suppressed_component_count = _suppressed_component_count(rejected_components)
             period_summary = {
                 "status": "completed",
                 "workflow_mode": "gee_trainlike_composite",
@@ -2372,12 +2371,7 @@ def run_gee_representative_calendar_pipeline(
         "run_dir": str(run_dir),
         "periods_dir": str(periods_root),
         "items_after_hard_filter": len(gee_items),
-        "period_counts": {
-            "total": len(periods),
-            "completed": sum(1 for p in period_results if p["status"] == "completed"),
-            "skipped": sum(1 for p in period_results if p["status"] == "skipped"),
-            "failed": sum(1 for p in period_results if p["status"] == "failed"),
-        },
+        "period_counts": _build_period_counts(period_results),
         "period_results": period_results,
         "run_config": {
             "gee_project": gee_project,
@@ -2407,12 +2401,7 @@ def run_gee_representative_calendar_pipeline(
             **build_final_output_trace_config(out_cfg),
         },
     }
-    if compatibility_info is not None:
-        summary["compatibility"] = compatibility_info
-    summary_json, summary_md = write_representative_job_summary(run_dir, summary)
-    summary["summary_json"] = str(summary_json)
-    summary["summary_md"] = (str(summary_md) if summary_md else None)
-    return summary
+    return _finalize_representative_job_summary(run_dir, summary, compatibility_info)
 
 
 def run_stac_trainlike_pipeline(
