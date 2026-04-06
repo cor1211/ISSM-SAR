@@ -201,9 +201,6 @@ class S3Downloader:
                     aws_secret_access_key=secret_key,
                 )
                 aws_session = AWSSession(b3_session)
-            elif boto3 is None and access_key and secret_key:
-                env_kwargs["AWS_ACCESS_KEY_ID"] = access_key
-                env_kwargs["AWS_SECRET_ACCESS_KEY"] = secret_key
 
             env = rasterio.Env(session=aws_session, **env_kwargs) if aws_session is not None else rasterio.Env(**env_kwargs)
             with env:
@@ -405,10 +402,6 @@ def probe_rasterio_href(label: str, href: str) -> bool:
                 aws_secret_access_key=secret_key,
             )
             aws_session = AWSSession(b3_session)
-        elif boto3 is None and access_key and secret_key:
-            # Fallback cho moi truong chua co boto3 package.
-            env_kwargs["AWS_ACCESS_KEY_ID"] = access_key
-            env_kwargs["AWS_SECRET_ACCESS_KEY"] = secret_key
 
         env = rasterio.Env(session=aws_session, **env_kwargs) if aws_session is not None else rasterio.Env(**env_kwargs)
         with env:
