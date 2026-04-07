@@ -196,18 +196,6 @@ def detect_s3_credential_source(env: Optional[Mapping[str, str]] = None) -> str:
     values = dict(os.environ if env is None else env)
     if values.get("S3_ACCESS_KEY") and values.get("S3_SECRET_KEY"):
         return "explicit_env"
-    ambient_markers = (
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_PROFILE",
-        "AWS_SHARED_CREDENTIALS_FILE",
-        "AWS_CONFIG_FILE",
-        "AWS_WEB_IDENTITY_TOKEN_FILE",
-        "AWS_ROLE_ARN",
-    )
-    if any(values.get(key) for key in ambient_markers):
-        return "ambient_chain"
     return "none"
 
 
