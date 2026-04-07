@@ -242,7 +242,7 @@ def build_publish_plan(
 
     artifacts = [
         PublishArtifact(
-            role="sr_vv",
+            role="vv",
             local_path=vv_local,
             bucket=vv_bucket,
             key=vv_key,
@@ -250,7 +250,7 @@ def build_publish_plan(
             content_type="image/tiff; application=geotiff; profile=cloud-optimized",
         ),
         PublishArtifact(
-            role="sr_vh",
+            role="vh",
             local_path=vh_local,
             bucket=vh_bucket,
             key=vh_key,
@@ -385,22 +385,15 @@ def execute_publish(
     verify_response = session.get(plan.item_url, timeout=timeout_seconds)
     _ensure(verify_response.ok, f"Published STAC item could not be reloaded: {plan.item_url}")
     remote_item = verify_response.json()
-    role_to_asset_key = {
-        "sr_vv": "vv",
-        "sr_vh": "vh",
-    }
     report["verification"] = {
         "item_url": plan.item_url,
         "status_code": verify_response.status_code,
         "item_id_matches": remote_item.get("id") == plan.item_id,
         "item_collection_matches": remote_item.get("collection") == plan.collection_id,
         "asset_hrefs_match": {
-            artifact.role: (
-                ((remote_item.get("assets") or {}).get(role_to_asset_key[artifact.role]) or {}).get("href")
-                == artifact.href
-            )
+            artifact.role: (((remote_item.get("assets") or {}).get(artifact.role) or {}).get("href") == artifact.href)
             for artifact in plan.artifacts
-            if artifact.role in {"sr_vv", "sr_vh"}
+            if artifact.role in {"vv", "vh"}
         },
     }
     _ensure(report["verification"]["item_id_matches"], "Published STAC item id mismatch.")

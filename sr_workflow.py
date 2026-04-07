@@ -421,7 +421,7 @@ def cleanup_published_local_artifacts(
 
     for artifact in list(getattr(plan, "artifacts", []) or []):
         role = str(getattr(artifact, "role", "") or "").strip()
-        if role not in {"sr_vv", "sr_vh", "item_json"}:
+        if role not in {"vv", "vh", "item_json"}:
             continue
         local_path = Path(str(getattr(artifact, "local_path"))).resolve()
         if not local_path.exists():
