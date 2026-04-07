@@ -374,14 +374,14 @@ def write_sr_output_geojson(
 
     sr_vv_asset = _raster_asset_metadata(
         sr_vv_path,
-        title="SR VV (x2)",
+        title="vv",
         roles=["data"],
         description="Super-resolved VV backscatter output masked by the valid geometry mask.",
         eo_bands=[{"name": "VV", "description": "Super-resolved VV backscatter"}],
     )
     sr_vh_asset = _raster_asset_metadata(
         sr_vh_path,
-        title="SR VH (x2)",
+        title="vh",
         roles=["data"],
         description="Super-resolved VH backscatter output masked by the valid geometry mask.",
         eo_bands=[{"name": "VH", "description": "Super-resolved VH backscatter"}],
@@ -467,7 +467,6 @@ def write_sr_output_geojson(
         properties.update(
             {
                 "source:period_id": period.get("period_id"),
-                "source:period_mode": period.get("period_mode"),
                 "source:period_start": period.get("period_start"),
                 "source:period_end": period.get("period_end"),
                 "source:period_anchor_datetime": period.get("period_anchor_datetime"),
