@@ -385,13 +385,20 @@ def execute_publish(
     verify_response = session.get(plan.item_url, timeout=timeout_seconds)
     _ensure(verify_response.ok, f"Published STAC item could not be reloaded: {plan.item_url}")
     remote_item = verify_response.json()
+    role_to_asset_key = {
+        "sr_vv": "vv",
+        "sr_vh": "vh",
+    }
     report["verification"] = {
         "item_url": plan.item_url,
         "status_code": verify_response.status_code,
         "item_id_matches": remote_item.get("id") == plan.item_id,
         "item_collection_matches": remote_item.get("collection") == plan.collection_id,
         "asset_hrefs_match": {
-            artifact.role: (((remote_item.get("assets") or {}).get(artifact.role) or {}).get("href") == artifact.href)
+            artifact.role: (
+                ((remote_item.get("assets") or {}).get(role_to_asset_key[artifact.role]) or {}).get("href")
+                == artifact.href
+            )
             for artifact in plan.artifacts
             if artifact.role in {"sr_vv", "sr_vh"}
         },
