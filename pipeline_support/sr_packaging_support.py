@@ -401,8 +401,8 @@ def write_sr_output_geojson(
         published_filename=sr_vh_publish_name,
     )
     assets: Dict[str, Any] = {
-        "sr_vv": sr_vv_asset,
-        "sr_vh": sr_vh_asset,
+        "vv": sr_vv_asset,
+        "vh": sr_vh_asset,
     }
 
     gsd = sr_vv_asset.get("gsd") or sr_vh_asset.get("gsd")
