@@ -35,6 +35,24 @@ def _join_url(base: str, *parts: str) -> str:
     return "/".join(cleaned)
 
 
+def _resolve_sr_resolution_context(summary: Dict[str, Any], infer_config: Dict[str, Any]) -> Tuple[int, Optional[float]]:
+    scale_factor = 2
+    try:
+        candidate = int(infer_config.get("scale_factor", 2))
+        if candidate >= 1:
+            scale_factor = candidate
+    except (TypeError, ValueError):
+        pass
+
+    run_config = summary.get("run_config") if isinstance(summary.get("run_config"), dict) else {}
+    try:
+        target_resolution = float(run_config.get("target_resolution"))
+    except (TypeError, ValueError):
+        return scale_factor, None
+
+    return scale_factor, (target_resolution / float(scale_factor))
+
+
 def _infer_sr_collection_name(summary: Dict[str, Any]) -> str:
     if summary.get("period") is not None and summary.get("component") is not None:
         return "issm-sar-sr-x2-monthly-component"
@@ -273,16 +291,24 @@ def _raster_asset_metadata(
     roles: List[str],
     description: Optional[str] = None,
     eo_bands: Optional[List[Dict[str, Any]]] = None,
+    nominal_gsd: Optional[float] = None,
 ) -> Dict[str, Any]:
     asset_path = Path(path)
     with rasterio.open(asset_path) as src:
         epsg = src.crs.to_epsg() if src.crs else None
-        gsd = _pixel_size_meters(
-            crs=src.crs,
-            transform=src.transform,
-            width=src.width,
-            height=src.height,
-        )
+        try:
+            gsd = float(nominal_gsd) if nominal_gsd is not None else None
+            if gsd is not None and gsd <= 0:
+                gsd = None
+        except (TypeError, ValueError):
+            gsd = None
+        if gsd is None:
+            gsd = _pixel_size_meters(
+                crs=src.crs,
+                transform=src.transform,
+                width=src.width,
+                height=src.height,
+            )
         raster_bands: List[Dict[str, Any]] = []
         for band_index in range(src.count):
             band_meta: Dict[str, Any] = {
@@ -369,6 +395,7 @@ def write_sr_output_geojson(
     item_href_mode = os.getenv("SR_ITEM_SELF_MODE", "stac_api")
     include_local_source_paths = _env_flag("SR_INCLUDE_LOCAL_SOURCE_PATHS", default=False)
     whole_monthly_public = summary.get("period") is not None and summary.get("component") is None
+    sr_scale_factor, nominal_sr_resolution = _resolve_sr_resolution_context(summary, infer_config)
     sr_vv_publish_name = f"{item_id}_vv.tif" if whole_monthly_public else Path(str(sr_vv_path)).name
     sr_vh_publish_name = f"{item_id}_vh.tif" if whole_monthly_public else Path(str(sr_vh_path)).name
 
@@ -378,6 +405,7 @@ def write_sr_output_geojson(
         roles=["data"],
         description="Super-resolved VV backscatter output masked by the valid geometry mask.",
         eo_bands=[{"name": "VV", "description": "Super-resolved VV backscatter"}],
+        nominal_gsd=nominal_sr_resolution,
     )
     sr_vh_asset = _raster_asset_metadata(
         sr_vh_path,
@@ -385,6 +413,7 @@ def write_sr_output_geojson(
         roles=["data"],
         description="Super-resolved VH backscatter output masked by the valid geometry mask.",
         eo_bands=[{"name": "VH", "description": "Super-resolved VH backscatter"}],
+        nominal_gsd=nominal_sr_resolution,
     )
     sr_vv_asset["href"] = _resolve_sr_href(
         summary,
@@ -424,7 +453,7 @@ def write_sr_output_geojson(
         "sar:polarizations": ["VV", "VH"],
         "sr:method": "ISSM-SAR",
         "sr:model": "ISSM-SAR x2 dual-polarization",
-        "sr:scale_factor": 2,
+        "sr:scale_factor": sr_scale_factor,
         "sr:product_version": os.getenv("SR_PRODUCT_VERSION", "v1"),
         "sr:publisher": os.getenv("SR_PUBLISHER", "EOV"),
         "sr:license": os.getenv("SR_LICENSE", "proprietary"),
