@@ -127,7 +127,7 @@ class SARInferencer:
             )
             device_name = "cpu"
         self.device = torch.device(device_name)
-        emit_infer_log(logging.INFO, "Inference device", device=str(self.device))
+        emit_infer_log(logging.DEBUG, "Inference device", device=str(self.device))
         self._log_device_overview()
 
         # ── normalisation params ──
@@ -147,7 +147,7 @@ class SARInferencer:
         self.overlap_px: int = int(self.patch_size * self.overlap_frac)
         self.stride: int = self.patch_size - self.overlap_px
         emit_infer_log(
-            logging.INFO,
+            logging.DEBUG,
             "Inference tiling",
             patch_size=self.patch_size,
             overlap_px=self.overlap_px,

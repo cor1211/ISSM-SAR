@@ -127,6 +127,15 @@ from runtime_env_overrides import apply_inference_env_overrides
 ensure_root_logging(DEFAULT_LOG_LEVEL)
 logger = logging.getLogger("sar_pipeline")
 AUTO_DATETIME_SENTINELS = {"", "auto", "latest_full_month", "previous_full_month", "auto_previous_full_month"}
+_HARDCODED_RUN_CONFIG_KEYS = {
+    "period_mode",
+    "period_boundary_policy",
+    "period_split_policy",
+    "same_orbit_direction",
+    "representative_pool_mode",
+    "componentize_seed_intersections",
+    "component_parent_mosaic",
+}
 
 
 def emit_pipeline_log(level: int, message: str, **fields: Any) -> None:
@@ -351,10 +360,7 @@ def build_failed_representative_run_summary(
     run_config = {
         "datetime": config.get("gee", {}).get("datetime") or config.get("stac", {}).get("datetime"),
         "datetime_resolution": runtime_info.get("datetime_resolution"),
-        "period_mode": train_cfg.get("period_mode", "month"),
-        "period_boundary_policy": train_cfg.get("period_boundary_policy", "clip_inside_period"),
-        "period_split_policy": train_cfg.get("period_split_policy", "first_half_vs_second_half"),
-        "componentize_seed_intersections": bool(train_cfg.get("componentize_seed_intersections", False)),
+        "same_orbit_direction": False,
         "component_item_min_coverage": train_cfg.get("component_item_min_coverage"),
         "component_min_area_ratio": train_cfg.get("component_min_area_ratio"),
         **build_final_output_trace_config(output_cfg),
@@ -544,8 +550,6 @@ def select_seed_intersection_component_candidates(
         candidate_count=len(candidates),
         pre_items=len(pre_items),
         post_items=len(post_items),
-        component_item_min_coverage=component_item_min_coverage,
-        component_min_area_ratio=component_min_area_ratio,
     )
 
     successful: List[Dict[str, Any]] = []
@@ -913,6 +917,8 @@ def write_representative_period_summary(period_dir: Path, summary: Dict[str, Any
     if isinstance(run_config, dict):
         run_config.setdefault("mode", summary.get("workflow_mode"))
         run_config.setdefault("selection_strategy", summary.get("selection_strategy"))
+        for key in _HARDCODED_RUN_CONFIG_KEYS:
+            run_config.pop(key, None)
     if summary.get("output_paths") is None:
         summary["output_paths"] = {
             "output_tif": summary.get("output_tif"),
@@ -938,6 +944,8 @@ def write_representative_job_summary(run_dir: Path, summary: Dict[str, Any]) -> 
     if isinstance(run_config, dict):
         run_config.setdefault("mode", summary.get("workflow_mode"))
         run_config.setdefault("selection_strategy", summary.get("selection_strategy"))
+        for key in _HARDCODED_RUN_CONFIG_KEYS:
+            run_config.pop(key, None)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(build_aoi_record(summary), f, indent=2, ensure_ascii=False)
     return json_path, None
@@ -997,10 +1005,10 @@ def run_stac_representative_calendar_pipeline(
     allow_partial_periods = bool(train_cfg.get("allow_partial_periods", False))
     min_scenes_per_half = int(train_cfg.get("min_scenes_per_half", 1))
     auto_relax_inside_period = bool(train_cfg.get("auto_relax_inside_period", True))
-    same_orbit_direction = bool(train_cfg.get("same_orbit_direction", pair_cfg.get("same_orbit_direction", False)))
-    representative_pool_mode = normalize_representative_pool_mode(train_cfg.get("representative_pool_mode", "mixed"))
-    componentize_seed_intersections = bool(train_cfg.get("componentize_seed_intersections", False))
-    component_parent_mosaic = bool(train_cfg.get("component_parent_mosaic", True))
+    same_orbit_direction = False
+    representative_pool_mode = normalize_representative_pool_mode("mixed")
+    componentize_seed_intersections = True
+    component_parent_mosaic = True
     component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 1.0))
     component_min_area_ratio = float(train_cfg.get("component_min_area_ratio", 0.0))
     save_debug_artifacts = save_debug_artifacts_enabled(config)
@@ -1016,10 +1024,6 @@ def run_stac_representative_calendar_pipeline(
         "Resolved representative monthly run configuration",
         period_count=len(periods),
         datetime=datetime_filter,
-        datetime_resolution=datetime_resolution,
-        representative_pool_mode=representative_pool_mode,
-        componentize_seed_intersections=componentize_seed_intersections,
-        component_parent_mosaic=component_parent_mosaic,
         save_debug_artifacts=save_debug_artifacts,
     )
 
@@ -1063,11 +1067,9 @@ def run_stac_representative_calendar_pipeline(
                 "manifest_path": str(period_manifest_path(period_dir)),
                 "period": {
                     "period_id": period["period_id"],
-                    "period_mode": period["period_mode"],
                     "period_start": period["period_start"],
                     "period_end": period["period_end"],
                     "period_anchor_datetime": period["period_anchor_datetime"],
-                    "period_split_policy": period_split_policy,
                 },
                 "items_in_period": {"pre": 0, "post": 0},
                 "skip_reason": skip_reason,
@@ -1079,15 +1081,9 @@ def run_stac_representative_calendar_pipeline(
                     "limit": int(stac_cfg.get("limit", 300)),
                     "min_aoi_coverage": float(pair_cfg.get("min_aoi_coverage", 0.0)),
                     "pols": ",".join(required_pols),
-                    "period_mode": period_mode,
-                    "period_boundary_policy": period_boundary_policy,
-                    "period_split_policy": period_split_policy,
                     "allow_partial_periods": allow_partial_periods,
                     "min_scenes_per_half": min_scenes_per_half,
                     "auto_relax_inside_period": auto_relax_inside_period,
-                    "same_orbit_direction": same_orbit_direction,
-                    "representative_pool_mode": representative_pool_mode,
-                    "componentize_seed_intersections": componentize_seed_intersections,
                     "component_item_min_coverage": component_item_min_coverage,
                     "component_min_area_ratio": component_min_area_ratio,
                     "save_debug_artifacts": save_debug_artifacts,
@@ -1126,15 +1122,9 @@ def run_stac_representative_calendar_pipeline(
                 "limit": int(stac_cfg.get("limit", 300)),
                 "min_aoi_coverage": float(pair_cfg.get("min_aoi_coverage", 0.0)),
                 "pols": ",".join(required_pols),
-                "period_mode": period_mode,
-                "period_boundary_policy": period_boundary_policy,
-                "period_split_policy": period_split_policy,
                 "allow_partial_periods": allow_partial_periods,
                 "min_scenes_per_half": min_scenes_per_half,
                 "auto_relax_inside_period": auto_relax_inside_period,
-                "same_orbit_direction": same_orbit_direction,
-                "representative_pool_mode": representative_pool_mode,
-                "componentize_seed_intersections": componentize_seed_intersections,
                 "component_item_min_coverage": component_item_min_coverage,
                 "component_min_area_ratio": component_min_area_ratio,
                 "save_debug_artifacts": save_debug_artifacts,
@@ -1160,12 +1150,6 @@ def run_stac_representative_calendar_pipeline(
         log_inference_env_overrides(infer_config)
     if device:
         infer_config["device"] = device
-    log_effective_runtime_settings(
-        workflow_mode=WORKFLOW_MODE_STAC_TRAINLIKE_COMPOSITE,
-        train_cfg=train_cfg,
-        infer_config=infer_config,
-        save_debug_artifacts=save_debug_artifacts,
-    )
     inferencer = SARInferencer(infer_config)
 
     period_results: List[Dict[str, Any]] = []
@@ -1201,8 +1185,6 @@ def run_stac_representative_calendar_pipeline(
             period_id=period["period_id"],
             pre_items=len(pre_items),
             post_items=len(post_items),
-            pre_scene_ids=[extract_item_info(item)["id"] for item in pre_items],
-            post_scene_ids=[extract_item_info(item)["id"] for item in post_items],
         )
 
         if componentize_seed_intersections:
@@ -1255,11 +1237,9 @@ def run_stac_representative_calendar_pipeline(
                     "period_dir": str(period_dir),
                     "period": {
                         "period_id": period["period_id"],
-                        "period_mode": period["period_mode"],
                         "period_start": period["period_start"],
                         "period_end": period["period_end"],
                         "period_anchor_datetime": period["period_anchor_datetime"],
-                        "period_split_policy": period_split_policy,
                     },
                     "items_in_period": {
                         "pre": len(pre_items),
@@ -1298,14 +1278,6 @@ def run_stac_representative_calendar_pipeline(
                 transient_root = Path(transient_dir)
                 component_inputs_root = ensure_dir(inputs_dir(period_dir) / "components")
                 component_intermediate_root = ensure_dir(intermediate_dir(period_dir) / "components")
-                emit_pipeline_log(
-                    logging.INFO,
-                    "Persisting component debug artifacts",
-                    period_id=period["period_id"],
-                    debug_inputs_root=component_inputs_root,
-                    debug_intermediate_root=component_intermediate_root,
-                    cleanup_after_publish_success=(not save_debug_artifacts),
-                )
                 component_mosaic_sources: List[Dict[str, Any]] = []
                 emit_pipeline_stage(
                     "Component Execution",
@@ -1496,13 +1468,6 @@ def run_stac_representative_calendar_pipeline(
                     selected_component_count=len(component_mosaic_sources),
                     parent_mosaic_ordering="largest_first",
                 )
-                emit_pipeline_log(
-                    logging.INFO,
-                    "Running parent mosaic from completed component outputs",
-                    period_id=period["period_id"],
-                    contributing_candidates=len(component_mosaic_sources),
-                    public_item_id=public_item_id,
-                )
                 parent_transient_output_tif = transient_root / f"{public_item_id}_parent_SR_x2.tif"
                 parent_mosaic = mosaic_component_sr_multibands_to_parent(
                     component_sources=component_mosaic_sources,
@@ -1569,11 +1534,9 @@ def run_stac_representative_calendar_pipeline(
                 "items_after_hard_filter": len(items),
                 "period": {
                     "period_id": period["period_id"],
-                    "period_mode": period["period_mode"],
                     "period_start": period["period_start"],
                     "period_end": period["period_end"],
                     "period_anchor_datetime": period["period_anchor_datetime"],
-                    "period_split_policy": period_split_policy,
                 },
                 "componentization": {
                     "enabled": True,
@@ -1589,7 +1552,6 @@ def run_stac_representative_calendar_pipeline(
                     "parent_supported_bbox": canonical_bbox_from_geometry(parent_mosaic["supported_geometry"]),
                     "parent_contributing_component_ids": parent_mosaic["contributing_component_ids"],
                     "parent_mosaic_ordering": parent_mosaic.get("parent_mosaic_ordering", "largest_first"),
-                    "component_parent_mosaic": component_parent_mosaic,
                     "decision_summary": {
                         "suppression_policy": "largest_first_tolerant_nested_pruning",
                         "suppressed_component_count": suppressed_component_count,
@@ -1608,22 +1570,15 @@ def run_stac_representative_calendar_pipeline(
                     "limit": int(stac_cfg.get("limit", 300)),
                     "min_aoi_coverage": float(pair_cfg.get("min_aoi_coverage", 0.0)),
                     "pols": ",".join(required_pols),
-                    "period_mode": period_mode,
-                    "period_boundary_policy": period_boundary_policy,
-                    "period_split_policy": period_split_policy,
                     "allow_partial_periods": allow_partial_periods,
                     "min_scenes_per_half": min_scenes_per_half,
                     "auto_relax_inside_period": auto_relax_inside_period,
-                    "same_orbit_direction": same_orbit_direction,
-                    "representative_pool_mode": representative_pool_mode,
                     "target_crs": target_crs,
                     "target_resolution": target_resolution,
                     "resampling": resampling_name,
                     "focal_median_radius_m": focal_radius_m,
                     "device": infer_config.get("device"),
                     "cache_staging": cache_staging,
-                    "componentize_seed_intersections": componentize_seed_intersections,
-                    "component_parent_mosaic": component_parent_mosaic,
                     "component_item_min_coverage": component_item_min_coverage,
                     "component_min_area_ratio": component_min_area_ratio,
                     "save_debug_artifacts": save_debug_artifacts,
@@ -1673,8 +1628,6 @@ def run_stac_representative_calendar_pipeline(
                 completed_components=len(component_results),
                 rejected_components=len(rejected_components),
                 parent_supported_area_ratio=parent_mosaic["supported_area_ratio"],
-                output_sr_vv_tif=packaged_outputs["output_sr_vv_tif"],
-                output_sr_vh_tif=packaged_outputs["output_sr_vh_tif"],
             )
             continue
 
@@ -1696,21 +1649,15 @@ def run_stac_representative_calendar_pipeline(
             "limit": int(stac_cfg.get("limit", 300)),
             "min_aoi_coverage": float(pair_cfg.get("min_aoi_coverage", 0.0)),
             "pols": ",".join(required_pols),
-            "period_mode": period_mode,
-            "period_boundary_policy": period_boundary_policy,
-            "period_split_policy": period_split_policy,
             "allow_partial_periods": allow_partial_periods,
             "min_scenes_per_half": min_scenes_per_half,
             "auto_relax_inside_period": auto_relax_inside_period,
-            "same_orbit_direction": same_orbit_direction,
-            "representative_pool_mode": representative_pool_mode,
             "target_crs": target_crs,
             "target_resolution": target_resolution,
             "resampling": resampling_name,
             "focal_median_radius_m": focal_radius_m,
             "device": infer_config.get("device"),
             "cache_staging": cache_staging,
-            "componentize_seed_intersections": componentize_seed_intersections,
             "component_item_min_coverage": component_item_min_coverage,
             "component_min_area_ratio": component_min_area_ratio,
             "save_debug_artifacts": save_debug_artifacts,
@@ -1804,10 +1751,10 @@ def run_gee_representative_calendar_pipeline(
     allow_partial_periods = bool(train_cfg.get("allow_partial_periods", False))
     min_scenes_per_half = int(train_cfg.get("min_scenes_per_half", 1))
     auto_relax_inside_period = bool(train_cfg.get("auto_relax_inside_period", True))
-    same_orbit_direction = bool(train_cfg.get("same_orbit_direction", pair_cfg.get("same_orbit_direction", False)))
-    representative_pool_mode = normalize_representative_pool_mode(train_cfg.get("representative_pool_mode", "mixed"))
-    componentize_seed_intersections = bool(train_cfg.get("componentize_seed_intersections", False))
-    component_parent_mosaic = bool(train_cfg.get("component_parent_mosaic", True))
+    same_orbit_direction = False
+    representative_pool_mode = normalize_representative_pool_mode("mixed")
+    componentize_seed_intersections = True
+    component_parent_mosaic = True
     component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 1.0))
     component_min_area_ratio = float(train_cfg.get("component_min_area_ratio", 0.0))
     save_debug_artifacts = save_debug_artifacts_enabled(config)
@@ -1862,12 +1809,6 @@ def run_gee_representative_calendar_pipeline(
         log_inference_env_overrides(infer_config)
     if device:
         infer_config["device"] = device
-    log_effective_runtime_settings(
-        workflow_mode=WORKFLOW_MODE_GEE_TRAINLIKE_COMPOSITE,
-        train_cfg=train_cfg,
-        infer_config=infer_config,
-        save_debug_artifacts=save_debug_artifacts,
-    )
     inferencer = SARInferencer(infer_config)
 
     period_results: List[Dict[str, Any]] = []
@@ -1923,11 +1864,9 @@ def run_gee_representative_calendar_pipeline(
                     "period_dir": str(period_dir),
                     "period": {
                         "period_id": period["period_id"],
-                        "period_mode": period["period_mode"],
                         "period_start": period["period_start"],
                         "period_end": period["period_end"],
                         "period_anchor_datetime": period["period_anchor_datetime"],
-                        "period_split_policy": period_split_policy,
                     },
                     "items_in_period": {
                         "pre": len(pre_items),
@@ -1964,13 +1903,6 @@ def run_gee_representative_calendar_pipeline(
             with tempfile.TemporaryDirectory(prefix=f"sr_components_{period['period_id']}_") as transient_dir:
                 transient_root = Path(transient_dir)
                 component_intermediate_root = ensure_dir(intermediate_dir(period_dir) / "components")
-                emit_pipeline_log(
-                    logging.INFO,
-                    "Persisting component debug artifacts",
-                    period_id=period["period_id"],
-                    debug_intermediate_root=component_intermediate_root,
-                    cleanup_after_publish_success=(not save_debug_artifacts),
-                )
                 component_mosaic_sources: List[Dict[str, Any]] = []
                 emit_pipeline_stage(
                     "Component Execution",
@@ -2225,11 +2157,9 @@ def run_gee_representative_calendar_pipeline(
                 "items_after_hard_filter": len(gee_items),
                 "period": {
                     "period_id": period["period_id"],
-                    "period_mode": period["period_mode"],
                     "period_start": period["period_start"],
                     "period_end": period["period_end"],
                     "period_anchor_datetime": period["period_anchor_datetime"],
-                    "period_split_policy": period_split_policy,
                 },
                 "componentization": {
                     "enabled": True,
@@ -2245,7 +2175,6 @@ def run_gee_representative_calendar_pipeline(
                     "parent_supported_bbox": canonical_bbox_from_geometry(parent_mosaic["supported_geometry"]),
                     "parent_contributing_component_ids": parent_mosaic["contributing_component_ids"],
                     "parent_mosaic_ordering": parent_mosaic.get("parent_mosaic_ordering", "largest_first"),
-                    "component_parent_mosaic": component_parent_mosaic,
                     "decision_summary": {
                         "suppression_policy": "largest_first_tolerant_nested_pruning",
                         "suppressed_component_count": suppressed_component_count,
@@ -2262,14 +2191,9 @@ def run_gee_representative_calendar_pipeline(
                     "datetime": datetime_filter,
                     "datetime_resolution": datetime_resolution,
                     "pols": ",".join(required_pols),
-                    "period_mode": period_mode,
-                    "period_boundary_policy": period_boundary_policy,
-                    "period_split_policy": period_split_policy,
                     "allow_partial_periods": allow_partial_periods,
                     "min_scenes_per_half": min_scenes_per_half,
                     "auto_relax_inside_period": auto_relax_inside_period,
-                    "same_orbit_direction": same_orbit_direction,
-                    "representative_pool_mode": representative_pool_mode,
                     "orbit_pass": orbit_pass,
                     "clip_mode": clip_mode_name,
                     "target_crs": target_crs,
@@ -2277,8 +2201,6 @@ def run_gee_representative_calendar_pipeline(
                     "focal_median_radius_m": focal_radius_m,
                     "device": infer_config.get("device"),
                     "cache_staging": cache_staging,
-                    "componentize_seed_intersections": componentize_seed_intersections,
-                    "component_parent_mosaic": component_parent_mosaic,
                     "component_item_min_coverage": component_item_min_coverage,
                     "component_min_area_ratio": component_min_area_ratio,
                     "save_debug_artifacts": save_debug_artifacts,
@@ -2338,14 +2260,9 @@ def run_gee_representative_calendar_pipeline(
             "datetime": datetime_filter,
             "datetime_resolution": datetime_resolution,
             "pols": ",".join(required_pols),
-            "period_mode": period_mode,
-            "period_boundary_policy": period_boundary_policy,
-            "period_split_policy": period_split_policy,
             "allow_partial_periods": allow_partial_periods,
             "min_scenes_per_half": min_scenes_per_half,
             "auto_relax_inside_period": auto_relax_inside_period,
-            "same_orbit_direction": same_orbit_direction,
-            "representative_pool_mode": representative_pool_mode,
             "orbit_pass": orbit_pass,
             "clip_mode": clip_mode_name,
             "target_crs": target_crs,
@@ -2353,7 +2270,6 @@ def run_gee_representative_calendar_pipeline(
             "focal_median_radius_m": focal_radius_m,
             "device": infer_config.get("device"),
             "cache_staging": cache_staging,
-            "componentize_seed_intersections": componentize_seed_intersections,
             "component_item_min_coverage": component_item_min_coverage,
             "component_min_area_ratio": component_min_area_ratio,
             "save_debug_artifacts": save_debug_artifacts,
@@ -2522,15 +2438,12 @@ def execute_pipeline_request(
         logger.info("=" * 72)
         logger.info("CLI pipeline started")
         logger.info(
-            "Runtime context | job_id=%s source_mode=%s aoi_id=%s effective_log_level=%s log_level_source=%s",
+            "Runtime context | job_id=%s source_mode=%s aoi_id=%s",
             runtime_info.get("job_id"),
             runtime_info.get("source_mode"),
             runtime_info.get("aoi_id"),
-            runtime_info.get("effective_log_level"),
-            runtime_info.get("log_level_source"),
         )
         logger.info("AOI: %s", geojson_path)
-        logger.info("Mode override: %s", mode_label or "(from config)")
         logger.info("Config: %s", config_path)
         logger.info("=" * 72)
         try:
@@ -2732,10 +2645,6 @@ def run_database_aoi_batch(
     capture_output: bool = True,
 ) -> Tuple[Dict[str, Any], int]:
     workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
-    workflow_profile = describe_pipeline_profile(
-        workflow_mode=workflow_mode,
-        train_cfg=config.get("trainlike", {}),
-    )
     default_root = ensure_dir(output_root or config.get("output", {}).get("root_dir", "runs/pipeline"))
     job_layout = job_layout_override or prepare_storage_job_layout(
         base_root=default_root,
@@ -2751,7 +2660,6 @@ def run_database_aoi_batch(
         workflow_mode=workflow_mode,
         record_count=len(records),
         selection_mode=selection_mode,
-        **workflow_profile,
     )
 
     aoi_entries: List[Dict[str, Any]] = []
@@ -3042,10 +2950,6 @@ def main() -> None:
         config["gee"]["authenticate"] = True
     if args.geojson:
         workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
-        workflow_profile = describe_pipeline_profile(
-            workflow_mode=workflow_mode,
-            train_cfg=config.get("trainlike", {}),
-        )
         default_root = ensure_dir(args.output_dir or config.get("output", {}).get("root_dir", "runs/pipeline"))
         job_layout = prepare_storage_job_layout(
             base_root=default_root,
@@ -3084,7 +2988,6 @@ def main() -> None:
                 output_root=aoi_layout["aoi_dir"],
                 target_month=config.get("trainlike", {}).get("target_month"),
                 datetime=config.get("stac", {}).get("datetime") or config.get("gee", {}).get("datetime"),
-                **workflow_profile,
             )
             if config.get("logging", {}).get("startup_env_checks", True):
                 log_startup_checks(runtime["startup_checks"])
@@ -3120,10 +3023,6 @@ def main() -> None:
 
     if args.db_aoi_id:
         workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
-        workflow_profile = describe_pipeline_profile(
-            workflow_mode=workflow_mode,
-            train_cfg=config.get("trainlike", {}),
-        )
         single_root = ensure_dir(args.output_dir or config.get("output", {}).get("root_dir", "runs/pipeline"))
         job_layout = prepare_storage_job_layout(
             base_root=single_root,
@@ -3151,7 +3050,6 @@ def main() -> None:
                 target_month=config.get("trainlike", {}).get("target_month"),
                 datetime=config.get("stac", {}).get("datetime") or config.get("gee", {}).get("datetime"),
                 requested_aoi_id=args.db_aoi_id,
-                **workflow_profile,
             )
             if config.get("logging", {}).get("startup_env_checks", True):
                 log_startup_checks(startup_checks)
@@ -3238,10 +3136,6 @@ def main() -> None:
         return
 
     workflow_mode = str(config.get("workflow", {}).get("mode", "unknown"))
-    workflow_profile = describe_pipeline_profile(
-        workflow_mode=workflow_mode,
-        train_cfg=config.get("trainlike", {}),
-    )
     default_root = ensure_dir(args.output_dir or config.get("output", {}).get("root_dir", "runs/pipeline"))
     preview_job_layout = prepare_storage_job_layout(
         base_root=default_root,
@@ -3269,7 +3163,6 @@ def main() -> None:
             target_month=config.get("trainlike", {}).get("target_month"),
             datetime=config.get("stac", {}).get("datetime") or config.get("gee", {}).get("datetime"),
             requested_db_limit=args.db_limit,
-            **workflow_profile,
         )
         if config.get("logging", {}).get("startup_env_checks", True):
             log_startup_checks(startup_checks)

@@ -336,7 +336,6 @@ class ISSM_SAR(nn.Module):
         self.use_bn = config.get('use_bn', True)
         self.use_gn = config.get('use_gn', False)
         
-        print(f"Normalization setup: Use BN: {self.use_bn}, Use GN: {self.use_gn}")
         
         # PFE Modules
         self.pfe_up = PFE(in_channels=pfe_cfg['in_channels'], out_channels=pfe_cfg['out_channels'], use_bn=self.use_bn, use_gn=self.use_gn)

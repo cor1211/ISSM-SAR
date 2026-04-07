@@ -409,15 +409,6 @@ def mosaic_component_sr_multibands_to_parent(
     """Merge child SR outputs back onto one parent AOI canvas."""
     if not component_sources:
         raise ValueError("component_sources must not be empty.")
-    emit_pipeline_log(
-        logging.INFO,
-        "Starting parent mosaic from component SR outputs",
-        component_source_count=len(component_sources),
-        target_crs=target_crs,
-        target_resolution=target_resolution,
-        output_path=output_path,
-    )
-
     parent_input_grid = build_target_grid(parent_aoi_bbox, target_crs, target_resolution, target_resolution)
     parent_sr_grid = build_sr_grid_from_input_grid(parent_input_grid, scale_factor=2)
     dst_shape = (int(parent_sr_grid["height"]), int(parent_sr_grid["width"]))
@@ -538,7 +529,6 @@ def mosaic_component_sr_multibands_to_parent(
         single_child_mosaic=(len(contributing_component_ids) == 1),
         contributing_component_ids=contributing_component_ids,
         supported_area_ratio=supported_area_ratio,
-        output_path=output_file,
     )
     return {
         "sr_multiband_path": str(output_file),

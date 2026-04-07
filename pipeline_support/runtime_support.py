@@ -15,7 +15,7 @@ import yaml
 
 from db_aoi_source import inspect_database_settings
 from pipeline_support.json_support import compact_jsonable
-from query_stac_download import DEFAULT_COLLECTION, DEFAULT_STAC_API, normalize_representative_pool_mode
+from query_stac_download import DEFAULT_COLLECTION, DEFAULT_STAC_API
 from runtime_env_overrides import apply_pipeline_env_overrides
 from runtime_logging import detect_s3_credential_source, normalize_log_level_name
 
@@ -116,10 +116,6 @@ def build_effective_runtime_settings(
     infer_cfg = ((infer_config or {}).get("inference") or {}) if isinstance(infer_config, dict) else {}
     return compact_jsonable(
         {
-            **describe_pipeline_profile(workflow_mode=workflow_mode, train_cfg=train_cfg),
-            "representative_pool_mode": normalize_representative_pool_mode(
-                train_cfg.get("representative_pool_mode", "mixed")
-            ),
             "min_scenes_per_half": int(train_cfg.get("min_scenes_per_half", 1)),
             "component_item_min_coverage": float(train_cfg.get("component_item_min_coverage", 1.0)),
             "component_min_area_ratio": float(train_cfg.get("component_min_area_ratio", 0.0)),

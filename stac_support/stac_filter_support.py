@@ -98,13 +98,6 @@ def resolve_spatial_filter(args: argparse.Namespace) -> Tuple[Optional[List[floa
     """
     if getattr(args, "geojson", None):
         bbox, geometry = load_geojson_aoi(args.geojson)
-        emit_runtime_log(
-            "query_stac_download",
-            logging.INFO,
-            "Resolved AOI spatial filter from GeoJSON",
-            geojson_path=args.geojson,
-            bbox=bbox,
-        )
         return bbox, geometry
     return args.bbox, None
 
@@ -129,7 +122,7 @@ def collect_items_with_filters(
     emit_runtime_log(
         "query_stac_download",
         logging.INFO,
-        "Combined temporal+spatial STAC query completed",
+        "STAC query completed",
         collection=args.collection,
         datetime=args.datetime,
         matched_items=len(items),
@@ -149,7 +142,7 @@ def collect_items_with_filters(
     emit_runtime_log(
         "query_stac_download",
         logging.INFO,
-        "STAC query pipeline counts",
+        "STAC query result summary",
         matched_items=len(items),
         hard_filtered_items=len(filtered),
     )
