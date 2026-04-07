@@ -212,15 +212,15 @@ def build_publish_plan(
 
     assets = item.get("assets") or {}
     asset_keys = set(assets.keys())
-    _ensure(asset_keys == {"sr_vv", "sr_vh"}, f"Expected exactly sr_vv and sr_vh assets, got: {sorted(asset_keys)}")
+    _ensure(asset_keys == {"vv", "vh"}, f"Expected exactly vv and vh assets, got: {sorted(asset_keys)}")
 
     vv_local = item_json.parent / f"{item_id}_vv.tif"
     vh_local = item_json.parent / f"{item_id}_vh.tif"
     _ensure(vv_local.exists(), f"Local VV COG not found next to item JSON: {vv_local}")
     _ensure(vh_local.exists(), f"Local VH COG not found next to item JSON: {vh_local}")
 
-    vv_href = str(assets["sr_vv"].get("href") or "").strip()
-    vh_href = str(assets["sr_vh"].get("href") or "").strip()
+    vv_href = str(assets["vv"].get("href") or "").strip()
+    vh_href = str(assets["vh"].get("href") or "").strip()
     vv_bucket, vv_key = _parse_s3_uri(vv_href)
     vh_bucket, vh_key = _parse_s3_uri(vh_href)
 
