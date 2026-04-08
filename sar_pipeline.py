@@ -13,7 +13,7 @@ import os
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -35,6 +35,7 @@ from pipeline_support.contract_support import (
 )
 from pipeline_support.json_support import compact_jsonable
 from query_stac_download import (
+    add_month_utc,
     DEFAULT_COLLECTION,
     DEFAULT_STAC_API,
     STACClient,
@@ -246,9 +247,8 @@ def resolve_target_month_datetime_range(target_month: str) -> Tuple[str, Dict[st
             raise ValueError
     except Exception as exc:
         raise ValueError(f"Invalid target month `{target_month}`. Expected format YYYY-MM.") from exc
-    next_year, next_month = _shift_year_month(year, month, 1)
     start_dt_utc = datetime(year, month, 1, tzinfo=timezone.utc)
-    end_dt_utc = datetime(next_year, next_month, 1, tzinfo=timezone.utc)
+    end_dt_utc = add_month_utc(start_dt_utc) - timedelta(seconds=1)
     resolved_datetime = f"{_utc_rfc3339(start_dt_utc)}/{_utc_rfc3339(end_dt_utc)}"
     return resolved_datetime, {
         "mode": "target_month",
@@ -328,9 +328,8 @@ def resolve_representative_datetime_filter(
     now_utc = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     now_local = now_utc.astimezone(local_tz)
     target_year, target_month = _shift_year_month(now_local.year, now_local.month, -months_back)
-    next_year, next_month = _shift_year_month(target_year, target_month, 1)
     start_dt_utc = datetime(target_year, target_month, 1, tzinfo=timezone.utc)
-    end_dt_utc = datetime(next_year, next_month, 1, tzinfo=timezone.utc)
+    end_dt_utc = add_month_utc(start_dt_utc) - timedelta(seconds=1)
     resolved_datetime = f"{_utc_rfc3339(start_dt_utc)}/{_utc_rfc3339(end_dt_utc)}"
 
     resolution = {
@@ -1818,7 +1817,7 @@ def run_gee_representative_calendar_pipeline(
         collection_id=collection_id,
         filter_geom=filter_geom,
         start_dt=datetime.fromisoformat(filter_start.replace("Z", "+00:00")),
-        end_dt=datetime.fromisoformat(filter_end.replace("Z", "+00:00")),
+        end_dt=datetime.fromisoformat(filter_end.replace("Z", "+00:00")) + timedelta(seconds=1),
         orbit_pass=orbit_pass,
     )
     gee_items = collection_scene_items(full_collection, aoi_bbox)

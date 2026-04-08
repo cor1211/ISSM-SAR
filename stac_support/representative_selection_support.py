@@ -53,7 +53,7 @@ def collect_period_half_items(
         dt = parse_datetime_utc(info["datetime"])
         if period_start <= dt < period_anchor:
             pre_items.append(item)
-        elif period_anchor <= dt < period_end:
+        elif period_anchor <= dt <= period_end:
             post_items.append(item)
     return pre_items, post_items
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 def parse_datetime_utc(value: str) -> datetime:
     """Parse RFC3339 datetime ve timezone UTC."""
@@ -59,19 +59,17 @@ def add_month_utc(dt: datetime) -> datetime:
 def expand_month_periods(datetime_range: Optional[str], allow_partial_periods: bool = False) -> List[Dict[str, Any]]:
     """Expand a finite datetime range into calendar-month periods."""
     start_dt, end_dt = parse_finite_datetime_range(datetime_range)
-    inclusive_full_end = end_dt
-    if end_dt.hour == 23 and end_dt.minute == 59 and end_dt.second == 59 and end_dt.microsecond == 0:
-        inclusive_full_end = end_dt + timedelta(seconds=1)
     periods: List[Dict[str, Any]] = []
     cursor = floor_month_utc(start_dt)
-    while cursor < inclusive_full_end:
+    while cursor <= end_dt:
         next_month = add_month_utc(cursor)
+        month_end = next_month - timedelta(seconds=1)
         if allow_partial_periods:
             period_start = max(cursor, start_dt)
-            period_end = min(next_month, inclusive_full_end)
-            is_full = period_start == cursor and period_end == next_month
-            if period_start < period_end:
-                period_anchor = midpoint_datetime(period_start, period_end)
+            period_end = min(month_end, end_dt)
+            is_full = period_start == cursor and period_end == month_end
+            if period_start <= period_end:
+                period_anchor = midpoint_datetime(period_start, period_end + timedelta(seconds=1))
                 periods.append(
                     {
                         "period_id": period_start.strftime("%Y-%m"),
@@ -83,14 +81,14 @@ def expand_month_periods(datetime_range: Optional[str], allow_partial_periods: b
                     }
                 )
         else:
-            if start_dt <= cursor and next_month <= inclusive_full_end:
-                period_anchor = midpoint_datetime(cursor, next_month)
+            if start_dt <= cursor and month_end <= end_dt:
+                period_anchor = midpoint_datetime(cursor, month_end + timedelta(seconds=1))
                 periods.append(
                     {
                         "period_id": cursor.strftime("%Y-%m"),
                         "period_mode": "month",
                         "period_start": cursor.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-                        "period_end": next_month.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "period_end": month_end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                         "period_anchor_datetime": period_anchor.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                         "is_full_period": True,
                     }

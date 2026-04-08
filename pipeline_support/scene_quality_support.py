@@ -31,7 +31,11 @@ def filter_grouped_paths_by_scene_quality(
     filtered: Dict[str, List[Path]] = {}
 
     for pol in pols:
-        kept = [Path(path) for path in grouped_paths.get(pol, []) if _band_floor_ratio(Path(path)) < threshold]
+        input_paths = [Path(path) for path in grouped_paths.get(pol, [])]
+        if not input_paths:
+            filtered[pol] = []
+            continue
+        kept = [path for path in input_paths if _band_floor_ratio(path) < threshold]
         if kept and len(kept) < min_required:
             raise RuntimeError(
                 "Scene quality filtering removed too many scenes "
