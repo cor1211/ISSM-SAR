@@ -108,6 +108,9 @@ from pipeline_support.raster_support import (
     resolve_resampling,
     write_multiband_geotiff,
 )
+from pipeline_support.scene_quality_support import (
+    filter_grouped_paths_by_scene_quality,
+)
 from pipeline_support.sr_packaging_support import (
     _summary_aoi_id,
     _summary_period_token,
@@ -795,6 +798,10 @@ def download_window_assets(
     return grouped
 
 
+def _scene_quality_floor_ratio_threshold_from_train_cfg(train_cfg: Dict[str, Any]) -> float:
+    return float(train_cfg.get("scene_quality_floor_ratio_threshold", 0.98))
+
+
 def compose_window_to_multiband(
     grouped_paths: Dict[str, List[Path]],
     grid: Dict[str, Any],
@@ -1011,6 +1018,7 @@ def run_stac_representative_calendar_pipeline(
     component_parent_mosaic = True
     component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 1.0))
     component_min_area_ratio = float(train_cfg.get("component_min_area_ratio", 0.0))
+    scene_quality_floor_ratio_threshold = _scene_quality_floor_ratio_threshold_from_train_cfg(train_cfg)
     save_debug_artifacts = save_debug_artifacts_enabled(config)
 
     periods = expand_month_periods(datetime_filter, allow_partial_periods=allow_partial_periods)
@@ -1351,6 +1359,19 @@ def run_stac_representative_calendar_pipeline(
                         component_geometry,
                         required_pols,
                         downloader,
+                    )
+                    required_scene_count = int(child_manifest.get("required_scene_count", 1))
+                    pre_paths = filter_grouped_paths_by_scene_quality(
+                        pre_paths,
+                        floor_ratio_threshold=scene_quality_floor_ratio_threshold,
+                        required_scene_count=required_scene_count,
+                        expected_polarizations=required_pols,
+                    )
+                    post_paths = filter_grouped_paths_by_scene_quality(
+                        post_paths,
+                        floor_ratio_threshold=scene_quality_floor_ratio_threshold,
+                        required_scene_count=required_scene_count,
+                        expected_polarizations=required_pols,
                     )
 
                     child_grid = build_target_grid(component_bbox, target_crs, target_resolution, target_resolution)
