@@ -91,7 +91,6 @@ PIPELINE_ENV_SPECS: Dict[str, tuple[str, Callable[[str], Any]]] = {
     "PIPELINE_TARGET_CRS": ("trainlike.target_crs", _parse_text),
     "PIPELINE_TARGET_RESOLUTION": ("trainlike.target_resolution", _parse_float),
     "PIPELINE_FOCAL_MEDIAN_RADIUS_M": ("trainlike.focal_median_radius_m", _parse_float),
-    "PIPELINE_SCENE_QUALITY_FLOOR_RATIO_THRESHOLD": ("trainlike.scene_quality_floor_ratio_threshold", _parse_float),
     "PIPELINE_SAVE_DEBUG_DATA": ("output.save_debug_artifacts", _parse_bool),
 }
 

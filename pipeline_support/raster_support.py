@@ -764,7 +764,14 @@ def export_masked_sr_band_cogs(
 
         return outputs
 
-def align_single_band_to_grid(path: str | Path, grid: Dict[str, Any], resampling: Resampling) -> np.ndarray:
+def align_single_band_to_grid(
+    path: str | Path,
+    grid: Dict[str, Any],
+    resampling: Resampling,
+    *,
+    valid_min_db: Optional[float] = None,
+    valid_max_db: Optional[float] = None,
+) -> np.ndarray:
     """Reproject one 1-band raster to the canonical grid."""
     path = Path(path)
     ref_crs = rasterio.crs.CRS.from_user_input(grid["crs"])
@@ -790,6 +797,12 @@ def align_single_band_to_grid(path: str | Path, grid: Dict[str, Any], resampling
             dst_nodata=np.nan,
             resampling=resampling,
         )
+        if valid_min_db is not None and valid_max_db is not None:
+            vmin = float(valid_min_db)
+            vmax = float(valid_max_db)
+            if vmin > vmax:
+                raise ValueError(f"Invalid valid dB range: min={vmin} > max={vmax}")
+            dst[(dst < vmin) | (dst > vmax)] = np.nan
         return dst
 
 

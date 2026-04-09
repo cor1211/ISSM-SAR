@@ -109,9 +109,6 @@ from pipeline_support.raster_support import (
     resolve_resampling,
     write_multiband_geotiff,
 )
-from pipeline_support.scene_quality_support import (
-    filter_grouped_paths_by_scene_quality,
-)
 from pipeline_support.sr_packaging_support import (
     _summary_aoi_id,
     _summary_period_token,
@@ -149,6 +146,19 @@ def emit_pipeline_log(level: int, message: str, **fields: Any) -> None:
 def emit_pipeline_stage(title: str, **fields: Any) -> None:
     normalized = " ".join(str(title or "").strip().upper().split()) or "PIPELINE"
     emit_pipeline_log(logging.INFO, f"================ {normalized} ================", **fields)
+
+
+def emit_period_banner(*, backend: str, aoi_id: str, period: Dict[str, Any], status: str) -> None:
+    status_label = " ".join(str(status or "").strip().upper().split()) or "STATUS"
+    emit_pipeline_log(
+        logging.INFO,
+        f"================ AOI MONTH {status_label} ================",
+        backend=backend,
+        aoi_id=aoi_id,
+        period_id=period.get("period_id"),
+        period_start=period.get("period_start"),
+        period_end=period.get("period_end"),
+    )
 
 
 def log_effective_runtime_settings(
@@ -797,10 +807,6 @@ def download_window_assets(
     return grouped
 
 
-def _scene_quality_floor_ratio_threshold_from_train_cfg(train_cfg: Dict[str, Any]) -> float:
-    return float(train_cfg.get("scene_quality_floor_ratio_threshold", 0.98))
-
-
 def compose_window_to_multiband(
     grouped_paths: Dict[str, List[Path]],
     grid: Dict[str, Any],
@@ -809,6 +815,8 @@ def compose_window_to_multiband(
     out_path: Path,
     output_cfg: Dict[str, Any],
     mask_geometry_wgs84: Optional[Dict[str, Any]] = None,
+    valid_min_db: Optional[float] = None,
+    valid_max_db: Optional[float] = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     """Align all scenes in one window, composite them, smooth them, and write one 2-band TIFF."""
     resampling = resolve_resampling(resampling_name)
@@ -822,7 +830,16 @@ def compose_window_to_multiband(
         paths = grouped_paths.get(pol_key, [])
         if not paths:
             raise RuntimeError(f"Window composite is missing polarization {pol_key.upper()}.")
-        aligned = [align_single_band_to_grid(p, grid, resampling) for p in paths]
+        aligned = [
+            align_single_band_to_grid(
+                p,
+                grid,
+                resampling,
+                valid_min_db=valid_min_db,
+                valid_max_db=valid_max_db,
+            )
+            for p in paths
+        ]
         composite = nanmedian_stack(aligned)
         composite = apply_focal_median_db(composite, focal_radius_m, resolution_m)
         bands.append(composite)
@@ -1017,7 +1034,6 @@ def run_stac_representative_calendar_pipeline(
     component_parent_mosaic = True
     component_item_min_coverage = float(train_cfg.get("component_item_min_coverage", 1.0))
     component_min_area_ratio = float(train_cfg.get("component_min_area_ratio", 0.0))
-    scene_quality_floor_ratio_threshold = _scene_quality_floor_ratio_threshold_from_train_cfg(train_cfg)
     save_debug_artifacts = save_debug_artifacts_enabled(config)
 
     periods = expand_month_periods(datetime_filter, allow_partial_periods=allow_partial_periods)
@@ -1155,6 +1171,9 @@ def run_stac_representative_calendar_pipeline(
     if infer_overrides:
         infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
         log_inference_env_overrides(infer_config)
+    norm_cfg = infer_config.get("normalization", {}) or {}
+    valid_min_db = float(norm_cfg.get("v_min", -25.0))
+    valid_max_db = float(norm_cfg.get("v_max", 5.0))
     if device:
         infer_config["device"] = device
     inferencer = SARInferencer(infer_config)
@@ -1165,6 +1184,7 @@ def run_stac_representative_calendar_pipeline(
         period_dir = ensure_dir(periods_root / period["period_id"])
         manifest_path = period_manifest_path(period_dir)
         output_dir = ensure_dir(period_dir / out_cfg.get("output_dir_name", "output"))
+        emit_period_banner(backend="stac", aoi_id=aoi_id, period=period, status="start")
         emit_pipeline_log(
             logging.INFO,
             "Processing representative period",
@@ -1275,6 +1295,7 @@ def run_stac_representative_calendar_pipeline(
                         "summary_md": (str(summary_md) if summary_md else None),
                     }
                 )
+                emit_period_banner(backend="stac", aoi_id=aoi_id, period=period, status="skipped")
                 continue
 
             downloader = S3Downloader()
@@ -1359,19 +1380,6 @@ def run_stac_representative_calendar_pipeline(
                         required_pols,
                         downloader,
                     )
-                    required_scene_count = int(child_manifest.get("required_scene_count", 1))
-                    pre_paths = filter_grouped_paths_by_scene_quality(
-                        pre_paths,
-                        floor_ratio_threshold=scene_quality_floor_ratio_threshold,
-                        required_scene_count=required_scene_count,
-                        expected_polarizations=required_pols,
-                    )
-                    post_paths = filter_grouped_paths_by_scene_quality(
-                        post_paths,
-                        floor_ratio_threshold=scene_quality_floor_ratio_threshold,
-                        required_scene_count=required_scene_count,
-                        expected_polarizations=required_pols,
-                    )
 
                     child_grid = build_target_grid(component_bbox, target_crs, target_resolution, target_resolution)
                     t1_composite_path, post_meta = compose_window_to_multiband(
@@ -1382,6 +1390,8 @@ def run_stac_representative_calendar_pipeline(
                         out_path=child_composite_dir / f"s1t1_{component_pair_id}.tif",
                         output_cfg=out_cfg,
                         mask_geometry_wgs84=component_geometry,
+                        valid_min_db=valid_min_db,
+                        valid_max_db=valid_max_db,
                     )
                     t2_composite_path, pre_meta = compose_window_to_multiband(
                         grouped_paths=pre_paths,
@@ -1391,6 +1401,8 @@ def run_stac_representative_calendar_pipeline(
                         out_path=child_composite_dir / f"s1t2_{component_pair_id}.tif",
                         output_cfg=out_cfg,
                         mask_geometry_wgs84=component_geometry,
+                        valid_min_db=valid_min_db,
+                        valid_max_db=valid_max_db,
                     )
 
                     transient_output_tif = transient_root / f"{component_pair_id}_SR_x2.tif"
@@ -1649,6 +1661,7 @@ def run_stac_representative_calendar_pipeline(
                 rejected_components=len(rejected_components),
                 parent_supported_area_ratio=parent_mosaic["supported_area_ratio"],
             )
+            emit_period_banner(backend="stac", aoi_id=aoi_id, period=period, status="completed")
             continue
 
 
@@ -1836,6 +1849,7 @@ def run_gee_representative_calendar_pipeline(
         period_dir = ensure_dir(periods_root / period["period_id"])
         output_dir = ensure_dir(period_dir / out_cfg.get("output_dir_name", "output"))
         manifest_path = period_manifest_path(period_dir)
+        emit_period_banner(backend="gee", aoi_id=aoi_id, period=period, status="start")
         anchor_dt = datetime.fromisoformat(period["period_anchor_datetime"].replace("Z", "+00:00"))
         period_start = datetime.fromisoformat(period["period_start"].replace("Z", "+00:00"))
         period_end = datetime.fromisoformat(period["period_end"].replace("Z", "+00:00"))
@@ -1915,6 +1929,7 @@ def run_gee_representative_calendar_pipeline(
                         "summary_md": (str(summary_md) if summary_md else None),
                     }
                 )
+                emit_period_banner(backend="gee", aoi_id=aoi_id, period=period, status="skipped")
                 continue
 
             component_results: List[Dict[str, Any]] = []
@@ -2262,6 +2277,7 @@ def run_gee_representative_calendar_pipeline(
                     "component_delivery_mode": "parent_mosaic",
                 }
             )
+            emit_period_banner(backend="gee", aoi_id=aoi_id, period=period, status="completed")
             continue
 
 

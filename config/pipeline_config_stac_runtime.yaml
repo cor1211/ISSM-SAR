@@ -60,7 +60,6 @@ trainlike:
   target_resolution: 10.0
   resampling: bilinear
   focal_median_radius_m: 15.0
-  scene_quality_floor_ratio_threshold: 0.9
   window_raw_dir_name: window_raw
   composite_dir_name: composite
 download:
