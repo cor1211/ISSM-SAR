@@ -1171,9 +1171,8 @@ def run_stac_representative_calendar_pipeline(
     if infer_overrides:
         infer_config.setdefault("_runtime", {})["env_overrides"] = compact_jsonable(infer_overrides)
         log_inference_env_overrides(infer_config)
-    norm_cfg = infer_config.get("normalization", {}) or {}
-    valid_min_db = float(norm_cfg.get("v_min", -25.0))
-    valid_max_db = float(norm_cfg.get("v_max", 5.0))
+    valid_min_db = -50.0
+    valid_max_db = None
     if device:
         infer_config["device"] = device
     inferencer = SARInferencer(infer_config)

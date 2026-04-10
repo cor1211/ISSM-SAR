@@ -797,12 +797,14 @@ def align_single_band_to_grid(
             dst_nodata=np.nan,
             resampling=resampling,
         )
-        if valid_min_db is not None and valid_max_db is not None:
-            vmin = float(valid_min_db)
-            vmax = float(valid_max_db)
-            if vmin > vmax:
-                raise ValueError(f"Invalid valid dB range: min={vmin} > max={vmax}")
-            dst[(dst < vmin) | (dst > vmax)] = np.nan
+        vmin = float(valid_min_db) if valid_min_db is not None else None
+        vmax = float(valid_max_db) if valid_max_db is not None else None
+        if vmin is not None and vmax is not None and vmin > vmax:
+            raise ValueError(f"Invalid valid dB range: min={vmin} > max={vmax}")
+        if vmin is not None:
+            dst[dst < vmin] = np.nan
+        if vmax is not None:
+            dst[dst > vmax] = np.nan
         return dst
 
 
